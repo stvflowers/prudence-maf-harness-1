@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "suite": "deterministic-capability-gates",
+  "cases": [
+    {
+      "id": "feature-delivery",
+      "description": "A complete portable-session feature preserves user-visible state without runtime secrets.",
+      "selectors": [
+        "tests/test_api.py::test_portable_session_archive_round_trip_excludes_runtime_state"
+      ]
+    },
+    {
+      "id": "bug-fix-edit",
+      "description": "An exact workspace edit produces the expected bounded diff and no unrelated file changes.",
+      "selectors": [
+        "tests/test_api.py::test_workspace_replace_preview_is_bounded_and_read_only",
+        "tests/test_api.py::test_file_approval_preview_persists_across_restart"
+      ]
+    },
+    {
+      "id": "test-writing",
+      "description": "The guarded workspace test tool runs a targeted generated test successfully.",
+      "selectors": [
+        "tests/test_api.py::test_workspace_read_tools_enforce_bounds_and_inspect_git"
+      ]
+    },
+    {
+      "id": "repository-analysis",
+      "description": "Bounded search, file reads, and Git inspection identify repository state.",
+      "selectors": [
+        "tests/test_api.py::test_workspace_read_tools_enforce_bounds_and_inspect_git",
+        "tests/test_api.py::test_subagent_budget_and_workspace_contract"
+      ]
+    },
+    {
+      "id": "hook-blocking",
+      "description": "Project-precedence lifecycle hooks block before protected actions execute.",
+      "selectors": [
+        "tests/test_api.py::test_hooks_apply_precedence_and_block_before_actions"
+      ]
+    },
+    {
+      "id": "permission-boundaries",
+      "description": "Write capabilities require explicit opt-in and path escapes remain denied.",
+      "selectors": [
+        "tests/test_api.py::test_workspace_write_capability_is_explicit_persistent_and_resets",
+        "tests/test_api.py::test_workspace_read_tools_enforce_bounds_and_inspect_git",
+        "tests/test_api.py::test_subagent_budget_and_workspace_contract"
+      ]
+    },
+    {
+      "id": "autonomous-budget",
+      "description": "Plan approval records and enforces the eight-iteration autonomous execution cap.",
+      "selectors": [
+        "tests/test_api.py::test_provider_session_stream_and_resume"
+      ]
+    }
+  ]
+}
