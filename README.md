@@ -26,6 +26,8 @@ The browser workspace includes:
   diffs for exact text replacements, and secondary raw-argument disclosure;
 - session-scoped file memory for unbound sessions and workspace-shared file memory under
   `<workspace>\.prudence\memory` for bound sessions;
+- workspace business notes stored under `<workspace>\.prudence\notes`, with artifact
+  indexing metadata under `<workspace>\.prudence\artifacts`;
 - persisted tool-call, tool-result, runtime-status, and context-usage events;
 - automatic WebSocket reconnection with refresh-safe event recovery;
 - classified provider failures with retry restricted to safe transient cases;
@@ -37,7 +39,8 @@ The browser workspace includes:
 - schema-versioned portable session archives for events, memory, instructions, and
   complete artifact version history without secrets or resumable runtime state;
 - explicit per-session workspace binding and read-only project-context discovery;
-- a native folder picker that fills the workspace path while preserving explicit binding;
+- a foreground-focused native folder picker that fills the workspace path while preserving
+  explicit binding;
 - layered `AGENTS.md`, Copilot, shared, and local workspace instruction loading;
 - inspectable managed, user, project, local, and session instruction precedence;
 - bounded read-only workspace search/file reads and Git status/diff/log tools;
@@ -73,6 +76,11 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. The Vite development server proxies `/api` and
 `/api/.../stream` to the backend on port 8000.
+
+## Documentation
+
+- [Agent Framework harness capabilities in Prudence](docs/agent-framework-harness-capabilities.md)
+- [Agent harness landscape presentation](docs/agent-harness-landscape.pptx)
 
 ## Local application
 

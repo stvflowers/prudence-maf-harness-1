@@ -1,6 +1,7 @@
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -16,7 +17,8 @@ from maf_harness.schemas import (
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_PREVIEW_CHARACTERS = 100_000
-WORKSPACE_NOTE_DIRECTORY = "prudence-notes"
+WORKSPACE_NOTE_DIRECTORY = ".prudence/notes"
+LEGACY_WORKSPACE_NOTE_DIRECTORY = "prudence-notes"
 WorkspaceArtifactKind = Literal["file", "note"]
 
 
@@ -31,7 +33,9 @@ class ArtifactStore:
     @classmethod
     def for_workspace(cls, workspace_root: Path) -> ArtifactStore:
         root = workspace_root.resolve(strict=True)
-        return cls(root / ".prudence" / "artifacts", root)
+        store = cls(root / ".prudence" / "artifacts", root)
+        store._migrate_legacy_workspace_notes()
+        return store
 
     def write_business_note(
         self,
@@ -89,10 +93,33 @@ class ArtifactStore:
         title: str | None = None,
         manifest_kind: WorkspaceArtifactKind = "file",
     ) -> ArtifactSummary:
+        return self._index_workspace_file(
+            session_id,
+            relative_path,
+            title=title,
+            manifest_kind=manifest_kind,
+            allow_prudence_notes=False,
+        )
+
+    def _index_workspace_file(
+        self,
+        session_id: str,
+        relative_path: str,
+        *,
+        title: str | None,
+        manifest_kind: WorkspaceArtifactKind,
+        allow_prudence_notes: bool,
+    ) -> ArtifactSummary:
         if self._workspace_root is None:
             raise ValueError("Workspace indexing requires a workspace artifact store")
-        normalized = self._normalize_workspace_path(relative_path)
-        target = self._workspace_file(normalized)
+        normalized = self._normalize_workspace_path(
+            relative_path,
+            allow_prudence_notes=allow_prudence_notes,
+        )
+        target = self._workspace_file(
+            normalized,
+            allow_prudence_notes=allow_prudence_notes,
+        )
         encoded = target.read_bytes()
         if len(encoded) > MAX_ARTIFACT_BYTES:
             raise ValueError(f"Artifact content exceeds {MAX_ARTIFACT_BYTES} bytes")
@@ -294,21 +321,28 @@ class ArtifactStore:
         self._workspace_note_directory(create=True)
         candidate = self._workspace_root / Path(*PurePosixPath(relative_path).parts)
         target = (
-            self._workspace_file(relative_path)
+            self._workspace_file(relative_path, allow_prudence_notes=True)
             if candidate.exists()
             else candidate
         )
         self._atomic_write(target, encoded)
-        return self.index_workspace_file(
+        return self._index_workspace_file(
             session_id,
             relative_path,
             title=title,
             manifest_kind="note",
+            allow_prudence_notes=True,
         )
 
     def _workspace_note_directory(self, *, create: bool) -> Path:
         assert self._workspace_root is not None
-        directory = self._workspace_root / WORKSPACE_NOTE_DIRECTORY
+        prudence_directory = self._workspace_root / ".prudence"
+        if prudence_directory.exists():
+            if prudence_directory.is_symlink() or not prudence_directory.is_dir():
+                raise ValueError("Workspace .prudence path must be a real directory")
+        elif create:
+            prudence_directory.mkdir()
+        directory = prudence_directory / "notes"
         if directory.exists():
             if directory.is_symlink() or not directory.is_dir():
                 raise ValueError(
@@ -321,6 +355,71 @@ class ArtifactStore:
         ):
             raise ValueError("Workspace business note path escapes the workspace")
         return directory
+
+    def _migrate_legacy_workspace_notes(self) -> None:
+        assert self._workspace_root is not None
+        legacy_directory = self._workspace_root / LEGACY_WORKSPACE_NOTE_DIRECTORY
+        if not legacy_directory.exists():
+            return
+        if legacy_directory.is_symlink() or not legacy_directory.is_dir():
+            raise ValueError("Legacy workspace business note path must be a real directory")
+
+        legacy_files = list(legacy_directory.iterdir())
+        if any(path.is_symlink() or not path.is_file() for path in legacy_files):
+            raise ValueError("Legacy workspace business note directory contains invalid entries")
+
+        note_directory = self._workspace_note_directory(create=True)
+        migrations: list[tuple[Path, Path]] = []
+        for source in legacy_files:
+            destination = note_directory / source.name
+            if destination.exists():
+                if (
+                    destination.is_symlink()
+                    or not destination.is_file()
+                    or destination.read_bytes() != source.read_bytes()
+                ):
+                    raise ValueError(
+                        f"Cannot migrate legacy workspace note {source.name}: "
+                        "the destination already exists"
+                    )
+            migrations.append((source, destination))
+
+        for source, destination in migrations:
+            if destination.exists():
+                source.unlink()
+            else:
+                os.replace(source, destination)
+
+        legacy_prefix = f"{LEGACY_WORKSPACE_NOTE_DIRECTORY}/"
+        for manifest in self._root.glob("note-*.json"):
+            artifact = ArtifactSummary.model_validate_json(
+                manifest.read_text(encoding="utf-8")
+            )
+            versions = [
+                version.model_copy(
+                    update={
+                        "file_name": (
+                            f"{WORKSPACE_NOTE_DIRECTORY}/"
+                            f"{version.file_name.removeprefix(legacy_prefix)}"
+                        )
+                    }
+                )
+                if version.file_name.startswith(legacy_prefix)
+                else version
+                for version in artifact.versions
+            ]
+            if versions != artifact.versions:
+                self._atomic_write(
+                    manifest,
+                    artifact.model_copy(update={"versions": versions})
+                    .model_dump_json(indent=2)
+                    .encode("utf-8"),
+                )
+        try:
+            legacy_directory.rmdir()
+        except PermissionError:
+            legacy_directory.chmod(stat.S_IWRITE)
+            legacy_directory.rmdir()
 
     def _write_workspace_manifest(
         self,
@@ -388,16 +487,28 @@ class ArtifactStore:
         version: ArtifactVersion,
     ) -> Path:
         if self._workspace_root is not None:
-            return self._workspace_file(version.file_name)
+            return self._workspace_file(
+                version.file_name,
+                allow_prudence_notes=self._workspace_manifest_kind(artifact_id)
+                == "note",
+            )
         artifact_directory = self._artifact_directory(session_id, artifact_id)
         target = (artifact_directory / version.file_name).resolve(strict=True)
         if not target.is_relative_to(artifact_directory):
             raise ValueError("Artifact version path escapes its artifact directory")
         return target
 
-    def _workspace_file(self, relative_path: str) -> Path:
+    def _workspace_file(
+        self,
+        relative_path: str,
+        *,
+        allow_prudence_notes: bool = False,
+    ) -> Path:
         assert self._workspace_root is not None
-        normalized = self._normalize_workspace_path(relative_path)
+        normalized = self._normalize_workspace_path(
+            relative_path,
+            allow_prudence_notes=allow_prudence_notes,
+        )
         candidate = self._workspace_root / Path(*PurePosixPath(normalized).parts)
         current = self._workspace_root
         for part in PurePosixPath(normalized).parts:
@@ -416,15 +527,27 @@ class ArtifactStore:
         return target
 
     @staticmethod
-    def _normalize_workspace_path(relative_path: str) -> str:
+    def _normalize_workspace_path(
+        relative_path: str,
+        *,
+        allow_prudence_notes: bool = False,
+    ) -> str:
         normalized = relative_path.strip().replace("\\", "/")
         candidate = PurePosixPath(normalized)
+        is_prudence_note = (
+            len(candidate.parts) >= 3
+            and candidate.parts[0].casefold() == ".prudence"
+            and candidate.parts[1].casefold() == "notes"
+        )
         if (
             not normalized
             or candidate.is_absolute()
             or not candidate.parts
             or ".." in candidate.parts
-            or candidate.parts[0].casefold() == ".prudence"
+            or (
+                candidate.parts[0].casefold() == ".prudence"
+                and not (allow_prudence_notes and is_prudence_note)
+            )
         ):
             raise ValueError("Artifact path must be relative to the workspace")
         return candidate.as_posix()

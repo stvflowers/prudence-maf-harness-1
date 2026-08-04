@@ -1,9 +1,11 @@
 import asyncio
 import json
+import stat
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from agent_framework import Content, FunctionInvocationContext, tool
@@ -2610,9 +2612,9 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
                 websocket.receive_json()
         approval = client.get(f"/api/sessions/{first['id']}/approvals").json()[0]
         assert approval["preview"]["affected_paths"] == [
-            "prudence-notes/test.md"
+            ".prudence/notes/test.md"
         ]
-        assert "prudence-notes/test.md" in approval["preview"]["preview_content"]
+        assert ".prudence/notes/test.md" in approval["preview"]["preview_content"]
 
         store = ArtifactStore.for_workspace(workspace)
         tools = WorkspaceReadTools(
@@ -2663,20 +2665,59 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
             "Original project plan"
         )
         collision_path = collision_note.versions[-1].file_name
-        assert collision_path == "prudence-notes/docs-plan-md.md"
+        assert collision_path == ".prudence/notes/docs-plan-md.md"
         assert (workspace / collision_path).read_text(encoding="utf-8") == (
             "# docs/plan.md\n\nSeparate business note"
         )
 
         note = store.write_business_note(first["id"], "Customer brief", "Real note")
-        note_path = workspace / "prudence-notes" / "customer-brief.md"
+        note_path = workspace / ".prudence" / "notes" / "customer-brief.md"
         assert note_path.read_text(encoding="utf-8") == "# Customer brief\n\nReal note"
+        with pytest.raises(ValueError, match="relative to the workspace"):
+            store.index_workspace_file(
+                first["id"],
+                ".prudence/notes/customer-brief.md",
+            )
         note = store.write_business_note(first["id"], "Customer brief", "Updated note")
         assert note.current_version == 2
         assert [version.version for version in note.versions] == [2]
         assert client.get(
             f"/api/sessions/{second['id']}/artifacts/{note.id}"
         ).json()["content"].endswith("Updated note")
+
+
+def test_workspace_artifact_store_migrates_legacy_business_notes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "legacy-note-workspace"
+    workspace.mkdir()
+    session_id = str(uuid4())
+    store = ArtifactStore.for_workspace(workspace)
+    note = store.write_business_note(session_id, "Legacy note", "Preserve me")
+    current_path = workspace / note.versions[-1].file_name
+    legacy_directory = workspace / "prudence-notes"
+    legacy_directory.mkdir()
+    legacy_path = legacy_directory / current_path.name
+    current_path.replace(legacy_path)
+    current_path.parent.rmdir()
+    manifest = workspace / ".prudence" / "artifacts" / f"note-{note.id}.json"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            ".prudence/notes/",
+            "prudence-notes/",
+        ),
+        encoding="utf-8",
+    )
+    legacy_directory.chmod(stat.S_IREAD)
+
+    migrated_store = ArtifactStore.for_workspace(workspace)
+
+    assert not legacy_directory.exists()
+    assert current_path.read_text(encoding="utf-8") == "# Legacy note\n\nPreserve me"
+    assert migrated_store.get_artifact(session_id, note.id).versions[-1].file_name == (
+        ".prudence/notes/legacy-note.md"
+    )
+    assert migrated_store.preview(session_id, note.id).content.endswith("Preserve me")
 
 
 def test_portable_session_archive_round_trip_excludes_runtime_state(tmp_path: Path) -> None:
