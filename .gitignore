@@ -2,6 +2,9 @@
 *.db
 *.db-shm
 *.db-wal
+*.ppt
+*.pptx
+~$*.ppt*
 backend/.venv/
 backend/.pytest_cache/
 backend/.ruff_cache/
