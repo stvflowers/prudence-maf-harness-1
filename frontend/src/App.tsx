@@ -1486,14 +1486,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 40 40">
-              <g fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4">
-                <path d="M20 20 12 12a6 6 0 1 1 8-8l4 4" />
-                <path d="M20 20 28 12a6 6 0 1 1 8 8l-4 4" />
-                <path d="M20 20 28 28a6 6 0 1 1-8 8l-4-4" />
-                <path d="M20 20 12 28a6 6 0 1 1-8-8l4-4" />
-              </g>
-            </svg>
+            <img src="/prudence-icon.png" alt="" />
           </div>
           <div>
             <strong>Prudence</strong>
