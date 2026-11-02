@@ -20,6 +20,7 @@
   <p>
     <a href="#quick-start">Quick start</a> &bull;
     <a href="#why-prudence">Features</a> &bull;
+    <a href="#interface">Interface</a> &bull;
     <a href="#architecture">Architecture</a> &bull;
     <a href="docs/agent-framework-harness-capabilities.md">Framework capabilities</a> &bull;
     <a href="#contributing">Contributing</a>
@@ -29,8 +30,10 @@
 ---
 
 <p align="center">
-  <img src="docs/assets/prudence-app.png" alt="Prudence local agent workspace" width="100%">
+  <img src="docs/assets/prudence-app.png" alt="Prudence Porcelain / Vermilion workspace with conversation, plan controls, and task progress" width="100%">
 </p>
+
+*Actual UI capture with synthetic local-provider and session fixtures; not a live model run.*
 
 Prudence provides a controlled browser workspace for planning, tool use, approvals, and agent
 delegation. Session data, tasks, events, and memory stay on the local machine by default;
@@ -62,6 +65,37 @@ workspace-scoped data remains with the bound project.
   `<workspace>\.prudence` when a session is bound.
 - **Accessible browser UI:** Use streaming chat, persistent task progress, searchable commands,
   keyboard navigation, semantic live regions, and reduced-motion support.
+
+## Interface
+
+Prudence uses **Porcelain / Vermilion**: a warm porcelain canvas, light taupe sidebar,
+chalk-white surfaces, ink typography, and restrained vermilion selections and actions.
+The light appearance stays consistent even when the operating system prefers dark mode.
+
+- Sessions and provider controls stay in the left sidebar.
+- Conversation occupies the center, with **Plan / Execute** in the top bar for single-provider
+  sessions. Counsel & Craft retains its existing mode behavior.
+- Current activity, tasks, memory, artifacts, and event inspection stay in the right panel.
+- Permission requests remain immediately above the composer, with exact arguments, previews,
+  and separate **Approve / Deny** controls. Pending approvals still block prompt submission.
+- Settings and command search use the same palette. Keyboard focus, reduced motion,
+  forced-color support, and the stacked narrow-screen layout are retained.
+- A quiet **Powered by Microsoft Agent Framework** attribution is centered at the bottom
+  of the workspace across welcome, conversation, configuration, and settings views.
+
+The brighter vermilion is used for accents; filled actions use a slightly deeper shade so
+white button labels meet the WCAG AA normal-text contrast threshold.
+
+<details>
+  <summary>Approval and settings screenshots</summary>
+
+  <p><img src="docs/assets/prudence-approval.png" alt="Permission gate showing a synthetic diff and approval controls" width="100%"></p>
+  <p><img src="docs/assets/prudence-settings.png" alt="Porcelain / Vermilion session settings with workspace and instruction controls" width="100%"></p>
+</details>
+
+All screenshots above are real browser captures using synthetic fixtures, without real
+workspace content, credentials, or model traffic. See the [frontend guide](frontend/README.md)
+for theme tokens, UI checks, and screenshot regeneration.
 
 ## Architecture
 

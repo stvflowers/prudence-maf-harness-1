@@ -1684,6 +1684,22 @@ function App() {
             </p>
             <h1>{selectedSession?.title ?? 'Welcome'}</h1>
           </div>
+          {selectedSession && !showProviderForm && !showSessionSettings && !sessionCraftProvider && (
+            <div className="mode-toggle" role="group" aria-label="Agent mode">
+              {(['plan', 'execute'] as const).map((mode) => (
+                <button
+                  className={sessionState?.mode === mode ? 'selected' : ''}
+                  aria-pressed={sessionState?.mode === mode}
+                  disabled={contextBusy}
+                  key={mode}
+                  type="button"
+                  onClick={() => void updateMode(mode)}
+                >
+                  {mode === 'plan' ? 'Plan' : 'Execute'}
+                </button>
+              ))}
+            </div>
+          )}
           <div className={`connection ${status}`} role="status" aria-live="polite">
             <span aria-hidden="true" />
             {status === 'running' ? 'Agent working' : status === 'ready' ? 'Connected' : status}
@@ -2305,7 +2321,7 @@ function App() {
                     hasPendingApproval
                       ? 'Resolve the pending approval before continuing...'
                       : status === 'ready'
-                        ? 'Message the agent...'
+                        ? 'Ask Prudence...'
                         : 'Waiting for the local backend...'
                   }
                   value={prompt}
@@ -2373,7 +2389,6 @@ function App() {
         ) : (
           <section className="empty-state">
             <div className="orbit" aria-hidden="true"><span>✦</span></div>
-            <p className="eyebrow">Microsoft Agent Framework</p>
             <h2>Your local agent workspace</h2>
             <p>Connect Microsoft Foundry or a local OpenAI-compatible model, then create a durable session.</p>
             <div className="empty-actions">
@@ -2386,6 +2401,8 @@ function App() {
             </div>
           </section>
         )}
+
+        <footer className="framework-credit">Powered by Microsoft Agent Framework</footer>
 
         {notice && (
           <div className="notice" role="status">
@@ -2454,25 +2471,8 @@ function App() {
           <CollapsibleContextSection
             id="tasks-section"
             eyebrow="Agent state"
-            title={sessionCraftProvider ? 'Tasks' : 'Mode & tasks'}
+            title="Tasks"
           >
-            {!sessionCraftProvider && (
-              <div className="context-heading">
-                <div className="mode-toggle" aria-label="Agent mode">
-                  {(['plan', 'execute'] as const).map((mode) => (
-                    <button
-                      className={sessionState?.mode === mode ? 'selected' : ''}
-                      disabled={contextBusy}
-                      key={mode}
-                      type="button"
-                      onClick={() => void updateMode(mode)}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
             {!sessionCraftProvider &&
               sessionState?.mode === 'plan' &&
               sessionState.tasks.some((task) => !task.is_complete) && (
