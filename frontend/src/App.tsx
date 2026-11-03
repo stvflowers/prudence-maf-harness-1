@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import './App.css'
@@ -80,7 +80,7 @@ function CollapsibleContextSection({
   const contentId = `${id}-content`
 
   return (
-    <section className={`context-section ${collapsed ? 'collapsed' : ''}`}>
+    <section id={id} className={`context-section ${collapsed ? 'collapsed' : ''}`}>
       <div className="context-section-heading">
         <div>
           <p className="eyebrow">{eyebrow}</p>
@@ -275,6 +275,59 @@ type ArtifactPreview = ArtifactSummary & {
   content_truncated: boolean
 }
 
+const sourceLanguages: Record<string, string> = {
+  '.ts': 'TypeScript', '.tsx': 'TypeScript',
+  '.js': 'JavaScript', '.jsx': 'JavaScript', '.mjs': 'JavaScript', '.cjs': 'JavaScript',
+  '.cs': 'C#', '.py': 'Python', '.java': 'Java', '.go': 'Go', '.rs': 'Rust',
+  '.c': 'C', '.cpp': 'C++', '.cc': 'C++', '.cxx': 'C++', '.hpp': 'C++',
+  '.rb': 'Ruby', '.php': 'PHP', '.swift': 'Swift', '.kt': 'Kotlin', '.kts': 'Kotlin',
+  '.scala': 'Scala', '.sh': 'Shell', '.bash': 'Shell', '.ps1': 'PowerShell', '.psm1': 'PowerShell',
+  '.sql': 'SQL', '.bicep': 'Bicep', '.tf': 'HCL',
+}
+
+function describeOutputs(artifacts: ArtifactSummary[]) {
+  const types = new Map<string, number>()
+  const languages = new Map<string, number>()
+  let bytes = 0
+  let knownSizes = 0
+  let missingMetadata = 0
+  let versions = 0
+  for (const artifact of artifacts) {
+    versions += artifact.versions.length
+    const current = artifact.versions.find((version) => version.version === artifact.current_version)
+    const name = current?.file_name.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase()
+    let extension = 'Unknown'
+    if (name) {
+      if (name === 'dockerfile' || name.startsWith('dockerfile.')) extension = 'Dockerfile'
+      else if (name === '.env' || name.startsWith('.env.')) extension = '.env'
+      else if (name.startsWith('.') && !name.slice(1).includes('.')) extension = name
+      else extension = name.match(/\.[a-z0-9]+$/)?.[0] ?? 'No extension'
+    } else missingMetadata += 1
+    types.set(extension, (types.get(extension) ?? 0) + 1)
+    const language = sourceLanguages[extension]
+    if (language) languages.set(language, (languages.get(language) ?? 0) + 1)
+    if (current && Number.isSafeInteger(current.size_bytes) && current.size_bytes >= 0) {
+      bytes += current.size_bytes
+      knownSizes += 1
+    }
+  }
+  const counts = (values: Map<string, number>) => [...values]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+  return { files: artifacts.length, types: counts(types), languages: counts(languages), bytes, knownSizes, missingMetadata, versions }
+}
+
+function formatBytes(bytes: number): string {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[unit]}`
+}
+
 type WorkspaceCommand = {
   id: string
   label: string
@@ -352,14 +405,32 @@ function payloadTasks(event: HarnessEvent): TaskItem[] | null {
 
 function activityTitle(event: HarnessEvent): string {
   if (event.type === 'tool_call') return `Tool requested: ${payloadText(event, 'name') ?? 'unknown'}`
-  if (event.type === 'tool_result') return `Tool finished: ${payloadText(event, 'name') ?? 'unknown'}`
+  if (event.type === 'tool_result') {
+    return `Tool ${event.payload.exception ? 'failed' : 'returned'}: ${payloadText(event, 'name') ?? 'unknown'}`
+  }
+  if (event.type === 'run_started') return 'Run started'
+  if (event.type === 'run_completed') return 'Run completed'
+  if (event.type === 'run_failed') return 'Run failed'
+  if (event.type === 'run_cancelled') return 'Run stopped'
+  if (event.type === 'run_waiting_approval' || event.type === 'approval_requested') return 'Approval needed'
+  if (event.type === 'approval_decided') {
+    return event.payload.approved === true
+      ? 'Request approved'
+      : event.payload.approved === false ? 'Request denied' : 'Approval decision recorded'
+  }
+  if (event.type === 'workspace_bound') return 'Workspace connected'
+  if (event.type === 'workspace_capabilities_changed') return 'Workspace permissions changed'
+  if (event.type === 'session_instructions_changed') return 'Session guidance updated'
+  if (event.type === 'session_title_updated') return 'Session renamed'
+  if (event.type === 'session_title_failed') return 'Session naming failed'
   if (event.type === 'context_usage') return 'Context usage updated'
   if (event.type === 'task_progress') return 'Plan progress updated'
   if (event.type === 'run_status') return payloadText(event, 'label') ?? 'Agent status updated'
   if (event.type === 'model_handoff_queued') return 'Craft microtask queued'
   if (event.type === 'model_handoff_started') return 'Counsel delegated work to Craft'
   if (event.type === 'model_handoff_attempt') {
-    return `Craft attempt ${payloadNumber(event, 'attempt') ?? 1} started`
+    const attempt = payloadNumber(event, 'attempt')
+    return attempt === null ? 'Craft attempt started' : `Craft attempt ${attempt} started`
   }
   if (event.type === 'model_handoff_retry') return 'Craft is retrying incomplete output'
   if (event.type === 'model_handoff_completed') return 'Craft returned work to Counsel'
@@ -446,10 +517,605 @@ function progressHint(event: HarnessEvent): string | null {
   return null
 }
 
+type ActivityView = {
+  title: string
+  summary: string
+  tone: 'neutral' | 'success' | 'warning' | 'danger'
+  label: string
+  facts: { label: string; value: string }[]
+  nextStep?: string
+}
+
+function describeActivity(event: HarnessEvent): ActivityView {
+  const view: ActivityView = {
+    title: activityTitle(event).replaceAll('_', ' '),
+    summary: 'This event has no readable summary yet. Inspect technical details for the recorded data.',
+    tone: 'neutral',
+    label: 'Event',
+    facts: [],
+  }
+  const addNumber = (key: string, label: string, suffix = '') => {
+    const value = payloadNumber(event, key)
+    if (value !== null) view.facts.push({ label, value: `${value.toLocaleString()}${suffix}` })
+  }
+  if (event.type === 'run_failed') {
+    view.tone = 'danger'
+    view.label = 'Failed'
+    view.summary = payloadText(event, 'message') ?? 'The run failed without a recorded failure summary.'
+    const category = payloadText(event, 'category')
+    if (category) view.facts.push({ label: 'Category', value: category.replaceAll('_', ' ') })
+    addNumber('status_code', 'HTTP')
+    view.facts.push({
+      label: 'Retry',
+      value: event.payload.retryable === true
+        ? 'Available'
+        : event.payload.retryable === false ? 'Manual rerun only' : 'Not reported',
+    })
+    const guidance: Record<string, string> = {
+      connection: 'Check that the model provider is running and reachable before trying again.',
+      timeout: 'Check provider connectivity before trying again.',
+      rate_limit: 'Wait for the provider rate limit to clear before trying again.',
+      provider_unavailable: 'Wait for the provider to recover before trying again.',
+      authentication: 'Review provider credentials and access before running again.',
+      invalid_request: 'Review the provider profile and request before running again.',
+      policy_blocked: 'Review the policy restriction; running again will not bypass it.',
+    }
+    view.nextStep = (category && guidance[category]) || 'Review technical details before running again.'
+  } else if (event.type === 'run_started') {
+    view.label = 'Started'
+    view.summary = 'The agent started processing your prompt.'
+  } else if (event.type === 'run_completed') {
+    view.tone = 'success'
+    view.label = 'Completed'
+    view.summary = 'This run finished. Review the response and any proposed changes.'
+  } else if (event.type === 'run_cancelled') {
+    view.tone = 'warning'
+    view.label = 'Stopped'
+    view.summary = 'The run was cancelled. Work already completed is not automatically undone.'
+  } else if (event.type === 'approval_requested' || event.type === 'run_waiting_approval') {
+    view.tone = 'warning'
+    view.label = 'Waiting'
+    view.summary = 'The agent needs your decision before continuing.'
+    const tool = payloadText(event, 'tool_name')
+    if (tool) view.facts.push({ label: 'Tool', value: tool.replaceAll('_', ' ') })
+    view.nextStep = 'Review the permission request above the composer.'
+  } else if (event.type === 'approval_decided') {
+    const approved = event.payload.approved
+    view.tone = approved === true ? 'success' : approved === false ? 'warning' : 'neutral'
+    view.label = 'Decision'
+    view.summary = approved === true
+      ? 'You approved this request. Other actions remain subject to their own approval gates.'
+      : approved === false ? 'You denied this request.' : 'The recorded decision is not recognized. Inspect technical details.'
+  } else if (event.type === 'tool_call' || event.type === 'tool_result') {
+    const failed = event.type === 'tool_result' && Boolean(event.payload.exception)
+    view.tone = failed ? 'danger' : 'neutral'
+    view.label = failed ? 'Failed' : event.type === 'tool_call' ? 'Requested' : 'Returned'
+    view.summary = failed
+      ? 'The tool reported an error. Inspect technical details before continuing.'
+      : event.type === 'tool_call' ? 'The agent requested this tool.' : 'The tool returned a result for the agent to inspect.'
+    const argumentsValue = event.payload.arguments
+    if (typeof argumentsValue === 'object' && argumentsValue !== null && 'path' in argumentsValue &&
+      typeof argumentsValue.path === 'string') {
+      view.facts.push({ label: 'Path', value: argumentsValue.path })
+    }
+  } else if (event.type === 'task_progress') {
+    view.label = 'Plan'
+    const tasks = payloadTasks(event)
+    if (tasks) {
+      const completed = tasks.filter((task) => task.is_complete).length
+      view.summary = `${completed} of ${tasks.length} tasks completed.`
+      const current = tasks.find((task) => !task.is_complete)
+      if (current) view.facts.push({ label: 'Next', value: current.title })
+    } else view.summary = 'Plan progress was recorded without readable task details.'
+  } else if (event.type === 'context_usage') {
+    view.label = 'Usage'
+    view.summary = 'Recorded model token usage for this run.'
+    addNumber('input_tokens', 'Input tokens')
+    addNumber('output_tokens', 'Output tokens')
+    addNumber('context_percent', 'Context', '%')
+  } else if (event.type === 'run_status') {
+    view.label = 'Progress'
+    view.title = 'Agent progress'
+    view.summary = payloadText(event, 'label') ?? 'Agent status updated without a readable label.'
+  } else if (event.type.startsWith('model_handoff_') || event.type.startsWith('subagent_')) {
+    view.label = 'Delegation'
+    if (event.type.endsWith('_failed') || event.type.endsWith('_rejected') || event.type.endsWith('_blocked')) {
+      view.tone = 'danger'
+    } else if (event.type.endsWith('_completed')) view.tone = 'success'
+    view.summary = progressHint(event) ?? (
+      event.type === 'subagent_started' ? 'A bounded subagent started its assigned task.'
+        : event.type === 'subagent_completed' ? 'The subagent returned its result.'
+          : event.type === 'subagent_failed' ? 'The subagent failed. Inspect technical details.'
+            : 'An unrecognized delegation event was recorded. Inspect technical details.'
+    )
+    addNumber('duration_ms', 'Duration', ' ms')
+    addNumber('tool_calls', 'Tool calls')
+    const target = payloadText(event, 'target_path')
+    if (target) view.facts.push({ label: 'Target', value: target })
+  } else if (event.type === 'workspace_bound') {
+    view.label = 'Workspace'
+    view.summary = 'This session is now bound to a local workspace.'
+    const root = payloadText(event, 'root_path')
+    if (root) view.facts.push({ label: 'Folder', value: root })
+    addNumber('context_file_count', 'Context files')
+  } else if (event.type === 'workspace_capabilities_changed') {
+    view.label = 'Permissions'
+    view.summary = 'Workspace permission settings were updated.'
+    for (const [key, label] of [['write_tools_enabled', 'Write access'], ['auto_approve_enabled', 'Auto-approve']]) {
+      view.facts.push({
+        label,
+        value: event.payload[key] === true ? 'Enabled' : event.payload[key] === false ? 'Disabled' : 'Not reported',
+      })
+    }
+  } else if (event.type === 'session_title_updated' || event.type === 'session_instructions_changed') {
+    view.label = 'Session'
+    view.summary = event.type === 'session_title_updated'
+      ? payloadText(event, 'title') ?? 'The session title was updated.'
+      : 'Guidance for this session was changed.'
+  } else if (event.type === 'session_title_failed') {
+    view.label = 'Failed'
+    view.tone = 'warning'
+    view.summary = 'Automatic session naming failed. This does not indicate that the main run failed.'
+  }
+  return view
+}
+
+function ActivityItem({ event }: { event: HarnessEvent }) {
+  const view = describeActivity(event)
+  const detail = payloadText(event, 'detail') ?? payloadText(event, 'error')
+  return (
+    <li className={`activity-item activity-${view.tone}`}>
+      <span className="activity-marker" aria-hidden="true">
+        <svg viewBox="0 0 16 16">
+          {view.tone === 'success' ? <path d="m4 8 3 3 5-6" />
+            : view.tone === 'danger' ? <path d="m5 5 6 6M11 5l-6 6" />
+              : view.tone === 'warning' ? <path d="M8 4v5m0 2v1" />
+                : <circle cx="8" cy="8" r="2" />}
+        </svg>
+      </span>
+      <article>
+        <header className="activity-meta">
+          <span>{view.label}</span>
+          <time dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+        </header>
+        <h3>{view.title}</h3>
+        <p className="activity-description">{view.summary}</p>
+        {view.facts.length > 0 && (
+          <dl className="activity-facts">
+            {view.facts.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
+          </dl>
+        )}
+        {view.nextStep && <p className="activity-next"><strong>Next step</strong>{view.nextStep}</p>}
+        <details className="activity-technical">
+          <summary>Technical details</summary>
+          <p className="activity-event-type">{event.type}</p>
+          {detail && <pre>{detail}</pre>}
+          <details className="activity-raw">
+            <summary>Raw event payload</summary>
+            <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+          </details>
+        </details>
+      </article>
+    </li>
+  )
+}
+
 function dataBoundaryLabel(boundary: DataBoundary): string {
   if (boundary === 'machine') return 'Model traffic stays on this machine'
   if (boundary === 'local_network') return 'Model traffic stays on your local network'
   return 'Prompts and tool outputs leave this machine'
+}
+
+type ModelChoice = {
+  id: string
+  name: string
+  model: string
+  boundary: DataBoundary | null
+  kind?: ProviderKind
+}
+
+function providerDisplayName(provider: Pick<Provider, 'name' | 'model'>): string {
+  return provider.name.trim().replace(/^(?:(?:Microsoft\s+)?Foundry(?:\s+Local)?|Local)(?:\s+|$)/i, '').trim() || provider.model
+}
+
+function ProviderSymbol({ kind }: { kind: ProviderKind }) {
+  const label = kind === 'foundry' ? 'Microsoft Foundry provider' : 'Local provider'
+  return (
+    <svg className={`provider-symbol ${kind}`} viewBox="0 0 24 24" role="img" aria-label={label}>
+      <title>{label}</title>
+      <path d={kind === 'foundry'
+        ? 'm12 3 9 9-9 9-9-9 9-9ZM12 7v10M7 12h10'
+        : 'm12 3 8 4.5v9L12 21l-8-4.5v-9L12 3ZM4 7.5l8 4.5 8-4.5M12 12v9'} />
+    </svg>
+  )
+}
+
+function ModelPicker({ choices, value, onChange, label, heading, triggerClassName, children, emptyHint }: {
+  choices: ModelChoice[]
+  value: string
+  onChange: (value: string) => void
+  label: string
+  heading: string
+  triggerClassName: string
+  children: ReactNode
+  emptyHint?: string
+}) {
+  const menuId = useId()
+  const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const typedRef = useRef({ text: '', time: 0 })
+  const [open, setOpen] = useState(false)
+  const [activeId, setActiveId] = useState(value)
+  const activeIndex = choices.findIndex((choice) => choice.id === activeId)
+
+  useLayoutEffect(() => {
+    if (!open) return
+    setActiveId(choices.find((choice) => choice.id === value)?.id ?? choices[0]?.id ?? '')
+    typedRef.current = { text: '', time: 0 }
+    listRef.current?.focus()
+  }, [open, choices, value])
+
+  useLayoutEffect(() => {
+    if (open) listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeId])
+
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [open])
+
+  function close() {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+
+  function choose(id: string) {
+    onChange(id)
+    close()
+  }
+
+  function navigate(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const key = event.key
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key)) {
+      event.preventDefault()
+      const index = key === 'Home' ? 0 : key === 'End' ? choices.length - 1
+        : Math.max(0, Math.min(choices.length - 1, activeIndex + (key === 'ArrowDown' ? 1 : -1)))
+      const choice = choices[index]
+      if (choice) setActiveId(choice.id)
+    } else if (key === 'Enter' || key === ' ') {
+      event.preventDefault()
+      choose(activeId)
+    } else if (key === 'Tab') close()
+    else if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      const character = key.toLowerCase()
+      const previous = Date.now() - typedRef.current.time < 700 ? typedRef.current.text : ''
+      const text = previous === character ? character : previous + character
+      typedRef.current = { text, time: Date.now() }
+      const ordered = [...choices.slice(activeIndex + 1), ...choices.slice(0, activeIndex + 1)]
+      const match = ordered.find((choice) => choice.model.toLowerCase().startsWith(text) || choice.name.toLowerCase().startsWith(text) || providerDisplayName(choice).toLowerCase().startsWith(text))
+      if (match) setActiveId(match.id)
+    }
+  }
+
+  return (
+    <div
+      className="model-picker"
+      ref={rootRef}
+      onBlur={(event) => {
+        if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && open) {
+          event.preventDefault()
+          event.stopPropagation()
+          close()
+        }
+      }}
+    >
+        <button
+          className={triggerClassName}
+          ref={triggerRef}
+          type="button"
+          aria-label={label}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={menuId}
+          onClick={() => setOpen(!open)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault()
+              setOpen(true)
+            }
+          }}
+        >
+          {children}
+          <svg className="model-picker-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d={open ? 'm8 14 4-4 4 4' : 'm8 10 4 4 4-4'} /></svg>
+        </button>
+      {open && (
+        <div className="model-options">
+          <p className="model-options-title">{heading}</p>
+          <div
+            id={menuId}
+            className="model-listbox"
+            role="listbox"
+            aria-label={`${label} options`}
+            aria-activedescendant={`${menuId}-${activeIndex}`}
+            ref={listRef}
+            tabIndex={-1}
+            onKeyDown={navigate}
+          >
+            {choices.map((choice, index) => (
+              <button
+                id={`${menuId}-${index}`}
+                className="model-option"
+                type="button"
+                role="option"
+                aria-label={`${choice.name} · ${choice.model}${choice.kind ? ` · ${choice.kind === 'foundry' ? 'Microsoft Foundry' : 'Local provider'}` : ''}${choice.boundary ? ` · ${choice.boundary.replaceAll('_', ' ')}` : ''}`}
+                aria-selected={value === choice.id}
+                data-active={activeId === choice.id}
+                tabIndex={-1}
+                key={choice.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseMove={() => setActiveId(choice.id)}
+                onClick={() => choose(choice.id)}
+              >
+                <span className="model-option-copy">
+                  <span className="model-option-name">
+                    {choice.kind && <ProviderSymbol kind={choice.kind} />}
+                    <strong title={choice.name}>{providerDisplayName(choice)}</strong>
+                  </span>
+                  {providerDisplayName(choice) !== choice.model && <small title={choice.model}>{choice.model}</small>}
+                  {(choice.kind || choice.boundary) && (
+                    <span className="model-option-meta">
+                      {choice.boundary && <span className={`pair-boundary ${choice.boundary}`} title={dataBoundaryLabel(choice.boundary)}>{choice.boundary.replaceAll('_', ' ')}</span>}
+                    </span>
+                  )}
+                </span>
+                {value === choice.id && <svg className="model-option-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10" /></svg>}
+              </button>
+            ))}
+          </div>
+          {choices.length === 1 && emptyHint && <p className="pairing-caption">{emptyHint}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CraftPicker({ counsel, providers, value, onChange }: {
+  counsel: Provider
+  providers: Provider[]
+  value: string
+  onChange: (value: string) => void
+}) {
+  const choices = useMemo<ModelChoice[]>(() => [
+    { id: '', name: 'Counsel only', model: 'Reason without a local coding model', boundary: null },
+    ...providers.filter((provider) => provider.kind === 'local').map((provider) => ({
+      id: provider.id, model: provider.model, name: provider.name, boundary: provider.data_boundary, kind: provider.kind,
+    })),
+  ], [providers])
+  const craft = providers.find((provider) => provider.id === value && provider.kind === 'local')
+  return (
+    <section className="model-pairing" aria-label="Counsel and Craft setup">
+      <div className="pairing-heading">
+        <h3>Counsel &amp; Craft</h3>
+        <span className={`pairing-state${craft ? ' paired' : ''}`}>{craft ? 'Paired' : 'Counsel only'}</span>
+      </div>
+      <div className="pairing-flow">
+        <div className="pairing-row">
+          <span className="pairing-icon counsel-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M7 8h10M7 12h7M7 16h4M5 3h14v18H5z" /></svg>
+          </span>
+          <div className="pairing-copy">
+            <span className="pairing-role"><strong>Counsel</strong><small>Reasoning</small></span>
+            <span className="pairing-model" title={`${counsel.name} · ${counsel.model}`}>{providerDisplayName(counsel)}</span>
+          </div>
+        </div>
+        <ModelPicker
+          choices={choices}
+          value={value}
+          onChange={onChange}
+          label="Craft local provider"
+          heading="Local coding model"
+          triggerClassName="pairing-row craft-trigger"
+          emptyHint="No local providers configured. Add a provider to enable Craft."
+        >
+          <span className="pairing-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-10-2 12" /></svg>
+          </span>
+          <span className="pairing-copy">
+            <span className="pairing-role"><strong>Craft</strong><small>Bounded coding</small></span>
+            <span className="pairing-model" title={craft ? `${craft.name} · ${craft.model}` : undefined}>{craft ? providerDisplayName(craft) : 'Choose a local model'}</span>
+          </span>
+        </ModelPicker>
+      </div>
+      <div className="pairing-footer">
+        {craft && <span className={`pair-boundary ${craft.data_boundary}`} title={dataBoundaryLabel(craft.data_boundary)}>{craft.data_boundary.replaceAll('_', ' ')}</span>}
+        <span>New-session setup</span>
+      </div>
+      <p className="pairing-caption">Counsel plans. Craft codes. Approvals still apply.</p>
+    </section>
+  )
+}
+
+function ProviderManager({ providers, initialId, onClose, onAdd, onEdit, onDelete, onImport, onExport, notify }: {
+  providers: Provider[]
+  initialId: string
+  onClose: () => void
+  onAdd: () => void
+  onEdit: (id: string) => void
+  onDelete: (id: string) => void
+  onImport: () => void
+  onExport: () => void
+  notify: (message: string) => void
+}) {
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const [managedId, setManagedId] = useState(initialId)
+  const [probes, setProbes] = useState<ProviderProbe[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [message, setMessage] = useState('')
+  const managed = providers.find((provider) => provider.id === managedId) ?? providers[0]
+  const profileId = managed?.id
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current
+    dialog?.showModal()
+    closeRef.current?.focus()
+    return () => dialog?.close()
+  }, [])
+
+  useEffect(() => {
+    setProbes([])
+    setMessage('')
+    setHistoryError('')
+    setHistoryLoading(false)
+    if (!profileId) return
+    let current = true
+    setHistoryLoading(true)
+    api<ProviderProbe[]>(`/api/providers/${profileId}/probes`)
+      .then((history) => { if (current) setProbes(history) })
+      .catch((error: unknown) => {
+        if (!current) return
+        const detail = error instanceof Error ? error.message : 'Could not load connectivity history.'
+        setMessage(detail)
+        setHistoryError(detail)
+        notify(detail)
+      })
+      .finally(() => { if (current) setHistoryLoading(false) })
+    return () => { current = false }
+  }, [profileId, notify])
+
+  function close() {
+    dialogRef.current?.close()
+    onClose()
+  }
+
+  async function testConnection() {
+    if (!managed || testing) return
+    setTesting(true)
+    let result = 'Testing provider connection...'
+    setMessage(result)
+    notify(result)
+    try {
+      await api<{ message: string }>(`/api/providers/${managed.id}/probe`, { method: 'POST' })
+      result = 'Provider connection succeeded.'
+    } catch (error) {
+      result = error instanceof Error ? error.message : 'Provider test failed.'
+    }
+    try {
+      setProbes(await api<ProviderProbe[]>(`/api/providers/${managed.id}/probes`))
+      setHistoryError('')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Could not refresh connectivity history.'
+      setHistoryError(detail)
+      result += ` ${detail}`
+    }
+    setMessage(result)
+    notify(result)
+    setTesting(false)
+  }
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="provider-manager"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.preventDefault(); close() }}
+      onKeyDown={(event) => {
+        event.stopPropagation()
+        trapDialogFocus(event)
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          close()
+        }
+      }}
+      onClick={(event) => {
+        if (event.target !== event.currentTarget) return
+        const bounds = event.currentTarget.getBoundingClientRect()
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close()
+      }}
+    >
+      <header className="provider-manager-heading">
+        <div><p className="eyebrow">Configuration</p><h2 id={titleId}>Provider manager</h2></div>
+        <button ref={closeRef} type="button" className="secondary" aria-label="Close provider manager" onClick={close}>Close</button>
+      </header>
+      <div className="provider-manager-body">
+        <div className="provider-manager-list" aria-label="Provider profiles">
+          <div className="provider-manager-list-heading"><strong>Profiles · {providers.length}</strong><button type="button" className="secondary" onClick={() => { close(); onAdd() }}>Add provider</button></div>
+          {providers.map((provider) => (
+            <button key={provider.id} type="button" aria-label={provider.name} disabled={testing} aria-pressed={managed?.id === provider.id} onClick={() => setManagedId(provider.id)}>
+              <span className="model-option-name"><ProviderSymbol kind={provider.kind} /><strong title={provider.name}>{providerDisplayName(provider)}</strong></span><small title={provider.model}>{provider.model}</small>
+            </button>
+          ))}
+          {!providers.length && <p className="empty-copy">No providers configured. Add or import a profile to get started.</p>}
+        </div>
+        <section className="provider-manager-detail">
+          {managed ? (
+            <>
+              <h3 title={managed.name}>{providerDisplayName(managed)}</h3><p className="provider-manager-model">{managed.model}</p>
+              <div className={`data-boundary ${managed.data_boundary}`}><strong>{managed.data_boundary.replaceAll('_', ' ')}</strong><span>{dataBoundaryLabel(managed.data_boundary)}</span></div>
+              <dl className="provider-limits"><div><dt>Context</dt><dd>{managed.max_context_window_tokens.toLocaleString()}</dd></div><div><dt>Output</dt><dd>{managed.max_output_tokens.toLocaleString()}</dd></div></dl>
+            </>
+          ) : <h3>No provider selected</h3>}
+          <p className="provider-manager-hint">Inspecting a profile here does not switch the active model.</p>
+          <div className="provider-actions">
+            <div className="provider-action-group"><p>Selected profile</p>
+              <button type="button" disabled={!managed || testing || historyLoading} onClick={() => void testConnection()}>{testing ? 'Testing connection...' : 'Test connection'}</button>
+              <button type="button" disabled={!managed || testing} onClick={() => { if (managed) { close(); onEdit(managed.id) } }}>Edit provider</button>
+            </div>
+            <div className="provider-action-group"><p>Configuration</p>
+              <button type="button" onClick={() => { close(); onImport() }}>Import configuration</button>
+              <button type="button" disabled={!providers.length} onClick={() => { close(); onExport() }}>Export configuration</button>
+            </div>
+            <div className="provider-action-group">
+              <button type="button" className="provider-delete" disabled={!managed || testing} onClick={() => { if (managed) { close(); onDelete(managed.id) } }}>Delete provider</button>
+            </div>
+          </div>
+          <div className="probe-history">
+            <strong>Connectivity history</strong>
+            {!managed ? <p>Select a profile to view connectivity history.</p> : historyLoading ? <p>Loading history...</p> : historyError ? <p>{historyError}</p> : !probes.length ? <p>No recorded connection tests.</p> : probes.slice(0, 3).map((probe) => (
+              <div key={probe.id}><span className={probe.ok ? 'probe-ok' : 'probe-failed'}>{probe.ok ? 'Passed' : 'Failed'}</span>
+                <time>{new Date(probe.checked_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
+                <small>Streaming {probe.streaming ? 'yes' : 'no'} · tools {probe.tool_calling ? 'yes' : 'no'}</small>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+      {message && <p className="provider-manager-status" role="status">{message}</p>}
+    </dialog>
+  )
+}
+
+function trapDialogFocus(event: ReactKeyboardEvent<HTMLElement>) {
+  if (event.key !== 'Tab') return
+  const focusable = [
+    ...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ]
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function draftDataBoundary(kind: ProviderKind, endpoint: string): DataBoundary {
@@ -497,7 +1163,7 @@ function latestProgressTasks(session: SessionDetail): TaskItem[] | null {
 
 function App() {
   const [providers, setProviders] = useState<Provider[]>([])
-  const [providerProbes, setProviderProbes] = useState<ProviderProbe[]>([])
+  const [providerManagerOpen, setProviderManagerOpen] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [selectedCraftProviderId, setSelectedCraftProviderId] = useState('')
@@ -512,6 +1178,8 @@ function App() {
   const [notice, setNotice] = useState('')
   const [showProviderForm, setShowProviderForm] = useState(false)
   const [showSessionSettings, setShowSessionSettings] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [contextCollapsed, setContextCollapsed] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState | null>(null)
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [memories, setMemories] = useState<Memory[]>([])
@@ -534,6 +1202,7 @@ function App() {
   const [commandQuery, setCommandQuery] = useState('')
   const socketRef = useRef<WebSocket | null>(null)
   const providerImportRef = useRef<HTMLInputElement | null>(null)
+  const providerManagerTriggerRef = useRef<HTMLButtonElement>(null)
   const archiveImportRef = useRef<HTMLInputElement | null>(null)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const commandSearchRef = useRef<HTMLInputElement | null>(null)
@@ -605,21 +1274,9 @@ function App() {
   }, [refreshProviders, refreshSessions])
 
   useEffect(() => {
-    if (!selectedProviderId) {
-      setProviderProbes([])
-      return
-    }
-    api<ProviderProbe[]>(`/api/providers/${selectedProviderId}/probes`)
-      .then(setProviderProbes)
-      .catch((error: unknown) =>
-        setNotice(error instanceof Error ? error.message : 'Could not load connectivity history.'),
-      )
-  }, [selectedProviderId])
-
-  useEffect(() => {
     const counsel = providers.find((provider) => provider.id === selectedProviderId)
     const craft = providers.find((provider) => provider.id === selectedCraftProviderId)
-    if (counsel?.kind !== 'foundry' || (craft && craft.kind !== 'local')) {
+    if (counsel?.kind !== 'foundry' || (selectedCraftProviderId && (!craft || craft.kind !== 'local'))) {
       setSelectedCraftProviderId('')
     }
   }, [providers, selectedCraftProviderId, selectedProviderId])
@@ -768,6 +1425,7 @@ function App() {
   )
   const pendingApprovals = approvals.filter((approval) => approval.status === 'pending')
   const hasPendingApproval = pendingApprovals.length > 0
+  const canSendPrompt = status === 'ready' && !hasPendingApproval && !contextBusy && !sessionState?.is_running
   const latestContextUsage = useMemo(
     () => activityEvents.findLast((event) => event.type === 'context_usage') ?? null,
     [activityEvents],
@@ -786,6 +1444,7 @@ function App() {
     [activityEvents],
   )
   const latestFailure = latestRunOutcome?.type === 'run_failed' ? latestRunOutcome : null
+  const failureView = latestFailure ? describeActivity(latestFailure) : null
   const progressHints = useMemo(() => {
     if (status !== 'running' && !hasPendingApproval) return []
     const runStartIndex = activityEvents.findLastIndex((event) => event.type === 'run_started')
@@ -799,9 +1458,23 @@ function App() {
   const visibleArtifacts = useMemo(() => {
     const query = artifactQuery.trim().toLocaleLowerCase()
     return query
-      ? artifacts.filter((artifact) => artifact.title.toLocaleLowerCase().includes(query))
+      ? artifacts.filter((artifact) =>
+          artifact.title.toLocaleLowerCase().includes(query) ||
+          artifact.versions.some((version) =>
+            version.version === artifact.current_version && version.file_name.toLocaleLowerCase().includes(query),
+          ),
+        )
       : artifacts
   }, [artifactQuery, artifacts])
+  const outputStats = useMemo(() => describeOutputs(artifacts), [artifacts])
+  const showContext = Boolean(selectedSession && !showProviderForm && !showSessionSettings)
+  const providerChoices = useMemo<ModelChoice[]>(() => {
+    if (!providers.length) return [{ id: '', name: 'Choose a model', model: 'Select a configured provider', boundary: null }]
+    return providers.map((provider) => ({
+      id: provider.id, name: provider.name, model: provider.model,
+      boundary: provider.data_boundary, kind: provider.kind,
+    }))
+  }, [providers])
 
   async function saveProvider(event: FormEvent) {
     event.preventDefault()
@@ -822,7 +1495,7 @@ function App() {
           ? current.map((provider) => (provider.id === saved.id ? saved : provider))
           : [...current, saved],
       )
-      setSelectedProviderId(saved.id)
+      setSelectedProviderId((current) => !editingProviderId || editingProviderId === current ? saved.id : current)
       setProviderDraft(defaultProvider)
       setEditingProviderId(null)
       setShowProviderForm(false)
@@ -832,37 +1505,14 @@ function App() {
     }
   }
 
-  async function testProvider() {
-    if (!selectedProviderId) return
-    setNotice('Testing provider connection...')
-    try {
-      await api<{ message: string }>(
-        `/api/providers/${selectedProviderId}/probe`,
-        { method: 'POST' },
-      )
-      setNotice('Provider connection succeeded.')
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Provider test failed.')
-    }
-    try {
-      setProviderProbes(
-        await api<ProviderProbe[]>(`/api/providers/${selectedProviderId}/probes`),
-      )
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Could not refresh connectivity history.'
-      setNotice((current) => `${current} ${message}`.trim())
-    }
-  }
-
   function addProvider() {
     setEditingProviderId(null)
     setProviderDraft(defaultProvider)
     setShowProviderForm(true)
   }
 
-  function editProvider() {
-    const provider = providers.find((item) => item.id === selectedProviderId)
+  function editProvider(providerId = selectedProviderId) {
+    const provider = providers.find((item) => item.id === providerId)
     if (!provider) return
     setEditingProviderId(provider.id)
     setProviderDraft({
@@ -877,15 +1527,14 @@ function App() {
     setShowProviderForm(true)
   }
 
-  async function deleteProvider() {
-    const provider = providers.find((item) => item.id === selectedProviderId)
+  async function deleteProvider(providerId = selectedProviderId) {
+    const provider = providers.find((item) => item.id === providerId)
     if (!provider || !window.confirm(`Delete provider "${provider.name}"?`)) return
     try {
       await api<void>(`/api/providers/${provider.id}`, { method: 'DELETE' })
       const remaining = providers.filter((item) => item.id !== provider.id)
       setProviders(remaining)
-      setSelectedProviderId(remaining[0]?.id ?? '')
-      setProviderProbes([])
+      setSelectedProviderId((current) => current === provider.id ? remaining[0]?.id ?? '' : current)
       setNotice('Provider profile deleted.')
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete the provider.')
@@ -997,31 +1646,31 @@ function App() {
     setCommandPaletteOpen(true)
   }
 
+  function closeProviderManager() {
+    setProviderManagerOpen(false)
+    providerManagerTriggerRef.current?.focus()
+  }
+
   function closeCommandPalette() {
     setCommandPaletteOpen(false)
     window.setTimeout(
-      () => (priorFocusRef.current ?? commandTriggerRef.current)?.focus(),
+      () => {
+        const prior = priorFocusRef.current
+        const target = prior?.isConnected && prior.getClientRects().length ? prior : commandTriggerRef.current
+        target?.focus()
+      },
       0,
     )
   }
 
-  function trapCommandPaletteFocus(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key !== 'Tab') return
-    const focusable = [
-      ...event.currentTarget.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
-      ),
-    ]
-    if (!focusable.length) return
-    const first = focusable[0]
-    const last = focusable.at(-1)
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last?.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
-    }
+  function toggleSidebar() {
+    if (!sidebarCollapsed && document.activeElement?.closest('#workspace-sidebar')) commandTriggerRef.current?.focus()
+    setSidebarCollapsed((current) => !current)
+  }
+
+  function toggleContext() {
+    if (!contextCollapsed && document.activeElement?.closest('#session-context')) commandTriggerRef.current?.focus()
+    setContextCollapsed((current) => !current)
   }
 
   async function openSession(sessionId: string) {
@@ -1065,14 +1714,39 @@ function App() {
     sendPrompt(prompt)
   }
 
-  function sendPrompt(value: string) {
+  function sendPrompt(value: string, clearDraft = true) {
     const content = value.trim()
-    if (!content || status !== 'ready' || hasPendingApproval || !socketRef.current) return
+    if (!content) {
+      setNotice('Enter a prompt before sending.')
+      return
+    }
+    if (!canSendPrompt) {
+      setNotice(hasPendingApproval
+        ? 'Resolve the pending approval before running a prompt.'
+        : 'Wait for the current run or session update to finish before sending.')
+      return
+    }
+    if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      setNotice('The session is disconnected. Wait for it to reconnect before sending.')
+      return
+    }
     followTranscriptRef.current = true
     setNotice('')
-    setPrompt('')
+    if (clearDraft) setPrompt('')
     setLiveResponse('')
+    setStatus('running')
     socketRef.current.send(JSON.stringify({ type: 'prompt', content }))
+  }
+
+  function editAndRerun(content: string) {
+    if (!canSendPrompt) {
+      setNotice('Wait until the session is ready before editing a prompt to rerun.')
+      return
+    }
+    if (prompt && prompt !== content && !window.confirm('Replace the current draft with this prompt?')) return
+    setPrompt(content)
+    setNotice('')
+    promptRef.current?.focus()
   }
 
   async function updateMode(mode: SessionState['mode']) {
@@ -1366,18 +2040,12 @@ function App() {
       setNotice('The original prompt is unavailable, so this run cannot be retried.')
       return
     }
-    setNotice('')
-    setLiveResponse('')
-    setStatus('running')
-    socketRef.current.send(JSON.stringify({ type: 'prompt', content }))
+    sendPrompt(content, false)
   }
 
   const selectedProvider = providers.find((provider) => provider.id === selectedProviderId)
   const sessionProvider = providers.find(
     (provider) => provider.id === selectedSession?.provider_id,
-  )
-  const selectedCraftProvider = providers.find(
-    (provider) => provider.id === selectedCraftProviderId,
   )
   const sessionCraftProvider = providers.find(
     (provider) => provider.id === selectedSession?.craft_provider_id,
@@ -1405,6 +2073,19 @@ function App() {
       id: 'configure-provider',
       label: 'Add model provider',
       run: addProvider,
+    },
+    {
+      id: 'toggle-left-sidebar',
+      label: `${sidebarCollapsed ? 'Expand' : 'Collapse'} left sidebar`,
+      shortcut: 'Alt+V',
+      run: toggleSidebar,
+    },
+    {
+      id: 'toggle-right-pane',
+      label: `${contextCollapsed ? 'Expand' : 'Collapse'} right pane`,
+      shortcut: 'Ctrl+Alt+V',
+      disabled: !showContext,
+      run: toggleContext,
     },
     {
       id: 'choose-workspace',
@@ -1442,6 +2123,16 @@ function App() {
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
+      if (providerManagerOpen) return
+      if (event.altKey && !event.metaKey && !event.shiftKey && !event.getModifierState('AltGraph') && event.key.toLocaleLowerCase() === 'v') {
+        event.preventDefault()
+        if (event.repeat) return
+        if (event.ctrlKey) {
+          if (showContext) toggleContext()
+        } else toggleSidebar()
+        if (commandPaletteOpen) closeCommandPalette()
+        return
+      }
       const target = event.target
       const isEditable =
         target instanceof HTMLInputElement ||
@@ -1479,11 +2170,9 @@ function App() {
 
   return (
     <div
-      className={`shell ${
-        selectedSession && !showProviderForm && !showSessionSettings ? 'has-context' : ''
-      }`}
+      className={`shell ${showContext ? 'has-context' : ''}${sidebarCollapsed ? ' sidebar-collapsed' : ''}${contextCollapsed ? ' context-collapsed' : ''}`}
     >
-      <aside className="sidebar">
+      <aside className="sidebar" id="workspace-sidebar" aria-label="Sessions and providers" hidden={sidebarCollapsed}>
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
             <img src="/prudence-icon.png" alt="" />
@@ -1558,28 +2247,33 @@ function App() {
         </nav>
 
         <div className="provider-panel">
-          <p className="eyebrow">Model provider</p>
-            <select
-              aria-label="Active model provider"
-              value={selectedProviderId}
-              onChange={(event) => setSelectedProviderId(event.target.value)}
-            >
-              <option value="">Select a provider</option>
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name}
-                </option>
-              ))}
-            </select>
+          <div className="provider-heading">
+            <p className="eyebrow">Model provider</p>
+            <button className="provider-add" type="button" onClick={addProvider} aria-label="Add provider" title="Add provider">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>
+          </div>
+          <ModelPicker
+            choices={providerChoices}
+            value={selectedProviderId}
+            onChange={setSelectedProviderId}
+            label="Active model provider"
+            heading="Available providers"
+            triggerClassName="provider-selector"
+          >
+            <span className="provider-trigger-icon">
+              {selectedProvider ? <ProviderSymbol kind={selectedProvider.kind} /> : <span aria-hidden="true">+</span>}
+            </span>
+            <span className="provider-trigger-copy">
+              <strong title={selectedProvider?.name}>{selectedProvider ? providerDisplayName(selectedProvider) : 'Choose a model'}</strong>
+              {(!selectedProvider || providerDisplayName(selectedProvider) !== selectedProvider.model) && (
+                <small title={selectedProvider?.model}>{selectedProvider?.model ?? 'Select a configured provider'}</small>
+              )}
+            </span>
+          </ModelPicker>
+          {!providers.length && <p className="provider-empty">Add a provider to connect your first model.</p>}
             {selectedProvider && (
               <>
-              <div className="provider-summary">
-                <span className={`provider-dot ${selectedProvider.kind}`} />
-                <div>
-                  <strong>{selectedProvider.kind === 'foundry' ? 'Microsoft Foundry' : 'Local'}</strong>
-                  <span>{selectedProvider.model}</span>
-                </div>
-              </div>
               <div className={`data-boundary ${selectedProvider.data_boundary}`}>
                 <strong>{selectedProvider.data_boundary.replaceAll('_', ' ')}</strong>
                 <span>{dataBoundaryLabel(selectedProvider.data_boundary)}</span>
@@ -1595,60 +2289,26 @@ function App() {
                 </div>
               </dl>
               {selectedProvider.kind === 'foundry' && (
-                <div className="dual-mode-picker">
-                  <label htmlFor="craft-provider">Counsel &amp; Craft</label>
-                  <select
-                    id="craft-provider"
-                    aria-label="Craft local provider"
-                    value={selectedCraftProviderId}
-                    onChange={(event) => setSelectedCraftProviderId(event.target.value)}
-                  >
-                    <option value="">Counsel only</option>
-                    {providers
-                      .filter((provider) => provider.kind === 'local')
-                      .map((provider) => (
-                        <option key={provider.id} value={provider.id}>
-                          {provider.name}
-                        </option>
-                      ))}
-                  </select>
-                  <small>
-                    Foundry Counsel plans and reasons. Local Craft supplies code and bounded
-                    simple work.
-                  </small>
-                  {selectedCraftProvider && (
-                    <span className={`data-boundary ${selectedCraftProvider.data_boundary}`}>
-                      Craft · {selectedCraftProvider.model} ·{' '}
-                      {selectedCraftProvider.data_boundary.replaceAll('_', ' ')}
-                    </span>
-                  )}
-                </div>
+                <CraftPicker
+                  key={selectedProvider.id}
+                  counsel={selectedProvider}
+                  providers={providers}
+                  value={selectedCraftProviderId}
+                  onChange={setSelectedCraftProviderId}
+                />
               )}
               </>
             )}
-            <details className="provider-actions-menu">
-              <summary>Provider actions</summary>
-              <div className="provider-actions">
-                <button className="secondary" type="button" onClick={() => void testProvider()} disabled={!selectedProviderId}>
-                  Test
-                </button>
-                <button className="secondary" type="button" onClick={editProvider} disabled={!selectedProviderId}>
-                  Edit
-                </button>
-                <button className="secondary" type="button" onClick={addProvider}>
-                  Add
-                </button>
-                <button className="secondary" type="button" onClick={() => void exportProviders()} disabled={!providers.length}>
-                  Export
-                </button>
-                <button className="secondary" type="button" onClick={() => providerImportRef.current?.click()}>
-                  Import
-                </button>
-                <button className="danger compact" type="button" onClick={() => void deleteProvider()} disabled={!selectedProviderId}>
-                  Delete
-                </button>
-              </div>
-            </details>
+            <button
+              ref={providerManagerTriggerRef}
+              className="provider-manager-trigger"
+              type="button"
+              aria-haspopup="dialog"
+              onClick={() => setProviderManagerOpen(true)}
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M9 4v6M15 14v6" /></svg>
+                Manage providers
+            </button>
             <input
               ref={providerImportRef}
               className="visually-hidden"
@@ -1657,22 +2317,6 @@ function App() {
               aria-label="Import provider configuration"
               onChange={(event) => void importProviders(event)}
             />
-            {providerProbes.length > 0 && (
-              <div className="probe-history">
-                <strong>Connectivity history</strong>
-                {providerProbes.slice(0, 3).map((probe) => (
-                  <div key={probe.id}>
-                    <span className={probe.ok ? 'probe-ok' : 'probe-failed'}>
-                      {probe.ok ? 'Passed' : 'Failed'}
-                    </span>
-                    <time>{new Date(probe.checked_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
-                    <small>
-                      Streaming {probe.streaming ? 'yes' : 'no'} · tools {probe.tool_calling ? 'yes' : 'no'}
-                    </small>
-                  </div>
-                ))}
-              </div>
-            )}
         </div>
       </aside>
 
@@ -2167,14 +2811,14 @@ function App() {
                   <div className="welcome-icon" aria-hidden="true">✦</div>
                   <h2>What should the agent work on?</h2>
                   <p>
-                    This session uses {sessionProvider?.name ?? 'its configured provider'}
-                    {sessionCraftProvider ? ` as Counsel and ${sessionCraftProvider.name} as Craft` : ''}.
+                    This session uses {sessionProvider ? providerDisplayName(sessionProvider) : 'its configured provider'}
+                    {sessionCraftProvider ? ` as Counsel and ${providerDisplayName(sessionCraftProvider)} as Craft` : ''}.
                     Activity and framework session state are persisted locally.
                   </p>
                 </div>
               ) : (
                 messages.map((message, index) => {
-                  const content = String(message.payload.content ?? '')
+                  const content = payloadText(message, 'content') ?? ''
                   const choicePrompt =
                     message.type === 'assistant_message' && index === messages.length - 1
                       ? extractAssistantChoices(content)
@@ -2195,7 +2839,7 @@ function App() {
                                       className="choice-option"
                                       type="button"
                                       key={`${choice.response}-${choice.label}`}
-                                      disabled={status !== 'ready' || hasPendingApproval}
+                                      disabled={!canSendPrompt}
                                       onClick={() => sendPrompt(choice.response)}
                                     >
                                       <span>{choice.label}</span>
@@ -2209,7 +2853,29 @@ function App() {
                             )}
                           </>
                         ) : (
-                          <p>{content}</p>
+                          <>
+                            <p>{content || 'Message content is unavailable.'}</p>
+                            <div className="prompt-actions" role="group" aria-label="Prompt actions">
+                              <button
+                                type="button"
+                                disabled={!canSendPrompt || !content.trim()}
+                                title="Send this prompt again in this session. Previous work is not undone."
+                                onClick={() => sendPrompt(content, false)}
+                              >
+                                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6a6 6 0 1 1-1 6M4 2v4h4" /></svg>
+                                Run again
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!canSendPrompt || !content.trim()}
+                                title="Load this prompt into the composer to edit before sending."
+                                onClick={() => editAndRerun(content)}
+                              >
+                                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12 4 4 4M3 17l4-1L17 6a2 2 0 0 0-4-4L3 12v5Z" /></svg>
+                                Edit &amp; rerun
+                              </button>
+                            </div>
+                          </>
                         )}
                       </div>
                     </article>
@@ -2381,7 +3047,7 @@ function App() {
                       </>
                     )}
                   </div>
-                  <button className="send" type="submit" disabled={!prompt.trim() || status !== 'ready' || hasPendingApproval} aria-label="Send message">↑</button>
+                  <button className="send" type="submit" disabled={!prompt.trim() || !canSendPrompt} aria-label="Send message">↑</button>
                 </div>
               </form>
             </div>
@@ -2402,22 +3068,21 @@ function App() {
           </section>
         )}
 
-        <footer className="framework-credit">Powered by Microsoft Agent Framework</footer>
-
         {notice && (
           <div className="notice" role="status">
             <span>{notice}</span>
             <button type="button" onClick={() => setNotice('')} aria-label="Dismiss notification">×</button>
           </div>
         )}
+        <footer className="framework-credit">Powered by Microsoft Agent Framework</footer>
       </main>
-      {selectedSession && !showProviderForm && !showSessionSettings && (
-        <aside className="context-panel" id="session-context" aria-label="Session context">
+      {showContext && (
+        <aside className="context-panel" id="session-context" aria-label="Session context" hidden={contextCollapsed}>
           <CollapsibleContextSection id="runtime-section" eyebrow="Runtime" title="Current activity">
             <div className="runtime-card" aria-live="polite">
               <strong>
-                {latestFailure
-                  ? payloadText(latestFailure, 'message')
+                {failureView
+                  ? failureView.title
                   : status === 'running'
                   ? (latestRunStatus && payloadText(latestRunStatus, 'label')) ?? 'Agent working'
                   : status === 'ready'
@@ -2426,9 +3091,11 @@ function App() {
               </strong>
               {latestFailure && (
                 <div className="runtime-error" role="alert">
+                  <p>{failureView?.summary}</p>
                   <span>
                     {payloadText(latestFailure, 'category')?.replaceAll('_', ' ') ?? 'run failure'}
                   </span>
+                  <p>{failureView?.nextStep}</p>
                   {payloadText(latestFailure, 'detail') && (
                     <details>
                       <summary>Diagnostic detail</summary>
@@ -2436,7 +3103,7 @@ function App() {
                     </details>
                   )}
                   {latestFailure.payload.retryable === true && (
-                    <button className="secondary" type="button" onClick={retryLastRun}>
+                    <button className="secondary" type="button" disabled={!canSendPrompt} onClick={retryLastRun}>
                       Retry last run
                     </button>
                   )}
@@ -2565,96 +3232,137 @@ function App() {
             </form>
           </CollapsibleContextSection>
 
-          <CollapsibleContextSection id="artifacts-section" eyebrow="Generated output" title="Artifacts">
-            <input
-              className="artifact-search"
-              aria-label="Search artifacts"
-              placeholder="Search artifacts"
-              value={artifactQuery}
-              onChange={(event) => setArtifactQuery(event.target.value)}
-            />
-            <div className="artifact-list">
-              {visibleArtifacts.length ? (
-                visibleArtifacts.map((artifact) => (
-                  <button
-                    className={artifactPreview?.id === artifact.id ? 'selected' : ''}
-                    key={artifact.id}
-                    type="button"
-                    onClick={() => void openArtifact(artifact.id)}
-                  >
-                    <span>{artifact.title}</span>
-                    <small>
-                      v{artifact.current_version} ·{' '}
-                      {new Date(artifact.updated_at).toLocaleDateString()}
-                    </small>
-                  </button>
-                ))
-              ) : (
-                <p className="empty-copy">No matching artifacts.</p>
-              )}
-            </div>
-            {artifactPreview && selectedSessionId && (
-              <article className="artifact-preview">
-                <div>
-                  <strong>{artifactPreview.title}</strong>
-                  <a
-                    href={`/api/sessions/${selectedSessionId}/artifacts/${artifactPreview.id}/download?version=${artifactPreview.version}`}
-                  >
-                    Download v{artifactPreview.version}
-                  </a>
+          <CollapsibleContextSection id="artifacts-section" eyebrow="Generated output" title="Output summary">
+            <dl className="output-metrics">
+              <div><dt>Indexed files</dt><dd>{outputStats.files.toLocaleString()}</dd></div>
+              <div>
+                <dt>{outputStats.knownSizes === outputStats.files ? 'Recorded size' : 'Known size'}</dt>
+                <dd>{outputStats.knownSizes > 0 || outputStats.files === 0 ? formatBytes(outputStats.bytes) : 'Not reported'}</dd>
+              </div>
+              <div><dt>Available versions</dt><dd>{outputStats.versions.toLocaleString()}</dd></div>
+            </dl>
+            {artifacts.length > 0 ? (
+              <>
+                <p className="output-description">
+                  Latest indexed outputs for this {workspace ? 'workspace' : 'session'}, not a scan of every workspace file.
+                </p>
+                <div className="output-breakdown">
+                  <h3>Programming languages</h3>
+                  {outputStats.languages.length > 0 ? (
+                    <dl>
+                      {outputStats.languages.map((language) => (
+                        <div key={language.name}><dt>{language.name}</dt><dd>{language.count} {language.count === 1 ? 'file' : 'files'}</dd></div>
+                      ))}
+                    </dl>
+                  ) : <p className="output-description">No programming-language filenames identified.</p>}
                 </div>
-                <pre>{artifactPreview.content}</pre>
-                {artifactPreview.content_truncated && (
-                  <p>Preview truncated. Download the artifact to inspect the full content.</p>
+                <div className="output-breakdown">
+                  <h3>File types</h3>
+                  <dl>
+                    {outputStats.types.map((type) => (
+                      <div key={type.name}><dt>{type.name}</dt><dd>{type.count} {type.count === 1 ? 'file' : 'files'}</dd></div>
+                    ))}
+                  </dl>
+                </div>
+                <p className="output-note">Languages are inferred from filename extensions, not content analysis.</p>
+                {outputStats.knownSizes < outputStats.files && (
+                  <p className="output-note">Size reported for {outputStats.knownSizes} of {outputStats.files} {outputStats.files === 1 ? 'file' : 'files'}.</p>
                 )}
-                <div className="artifact-versions" aria-label="Artifact versions">
-                  {artifactPreview.versions.map((version) => (
-                    <button
-                      className={artifactPreview.version === version.version ? 'selected' : ''}
-                      disabled={contextBusy}
-                      key={version.version}
-                      type="button"
-                      onClick={() => void openArtifact(artifactPreview.id, version.version)}
-                    >
-                      v{version.version}
-                    </button>
-                  ))}
-                </div>
-              </article>
-            )}
+                {outputStats.missingMetadata > 0 && (
+                  <p className="output-note">Current-file metadata is missing for {outputStats.missingMetadata} {outputStats.missingMetadata === 1 ? 'output' : 'outputs'}.</p>
+                )}
+                <details className="output-inspection">
+                  <summary>Inspect files</summary>
+                  <input
+                    className="artifact-search"
+                    aria-label="Search artifacts"
+                    placeholder="Search artifacts"
+                    value={artifactQuery}
+                    onChange={(event) => setArtifactQuery(event.target.value)}
+                  />
+                  <div className="artifact-list">
+                    {visibleArtifacts.length ? (
+                      visibleArtifacts.map((artifact) => (
+                        <button
+                          className={artifactPreview?.id === artifact.id ? 'selected' : ''}
+                          key={artifact.id}
+                          type="button"
+                          onClick={() => void openArtifact(artifact.id)}
+                        >
+                          <span>{artifact.title}</span>
+                          <small>
+                            v{artifact.current_version} ·{' '}
+                            {new Date(artifact.updated_at).toLocaleDateString()}
+                          </small>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="empty-copy">No matching artifacts.</p>
+                    )}
+                  </div>
+                  {artifactPreview && selectedSessionId && (
+                    <article className="artifact-preview">
+                      <div>
+                        <strong>{artifactPreview.title}</strong>
+                        <a
+                          href={`/api/sessions/${selectedSessionId}/artifacts/${artifactPreview.id}/download?version=${artifactPreview.version}`}
+                        >
+                          Download v{artifactPreview.version}
+                        </a>
+                      </div>
+                      <pre>{artifactPreview.content}</pre>
+                      {artifactPreview.content_truncated && (
+                        <p>Preview truncated. Download the artifact to inspect the full content.</p>
+                      )}
+                      <div className="artifact-versions" aria-label="Artifact versions">
+                        {artifactPreview.versions.map((version) => (
+                          <button
+                            className={artifactPreview.version === version.version ? 'selected' : ''}
+                            disabled={contextBusy}
+                            key={version.version}
+                            type="button"
+                            onClick={() => void openArtifact(artifactPreview.id, version.version)}
+                          >
+                            v{version.version}
+                          </button>
+                        ))}
+                      </div>
+                    </article>
+                  )}
+                </details>
+              </>
+            ) : <p className="empty-copy">Generated files and notes will be summarized here once indexed.</p>}
           </CollapsibleContextSection>
 
           <CollapsibleContextSection id="activity-section" eyebrow="Audit trail" title="Activity">
+            <p className="activity-count">
+              {activityEvents.length > 12 ? `Latest 12 of ${activityEvents.length} events` : `${activityEvents.length} recorded events`}
+              {activityEvents.length > 0 && ' · Newest first'}
+            </p>
+            {activityEvents.length === 0 && <p className="empty-copy">No activity yet. Events appear when a run starts.</p>}
             <ol className="activity-list">
               {activityEvents
                 .slice(-12)
                 .reverse()
                 .map((event) => (
-                  <li key={event.id}>
-                    <details>
-                      <summary>
-                        <span className={`event-kind ${event.type}`}>
-                          {event.type === 'tool_call'
-                            ? 'Tool'
-                            : event.type === 'tool_result'
-                              ? 'Result'
-                              : event.type === 'context_usage'
-                                ? 'Usage'
-                                : event.type.startsWith('subagent_') ||
-                                    event.type.startsWith('model_handoff_')
-                                  ? 'Agent'
-                                : 'Status'}
-                        </span>
-                        <span>{activityTitle(event)}</span>
-                        <time>{new Date(event.created_at).toLocaleTimeString()}</time>
-                      </summary>
-                      <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-                    </details>
-                  </li>
+                  <ActivityItem event={event} key={event.id} />
                 ))}
             </ol>
           </CollapsibleContextSection>
         </aside>
+      )}
+      {providerManagerOpen && (
+        <ProviderManager
+          providers={providers}
+          initialId={selectedProviderId}
+          onClose={closeProviderManager}
+          onAdd={addProvider}
+          onEdit={editProvider}
+          onDelete={(id) => void deleteProvider(id)}
+          onImport={() => providerImportRef.current?.click()}
+          onExport={() => void exportProviders()}
+          notify={setNotice}
+        />
       )}
       {commandPaletteOpen && (
         <div className="command-backdrop" onMouseDown={closeCommandPalette}>
@@ -2665,7 +3373,7 @@ function App() {
             aria-modal="true"
             aria-labelledby="command-palette-title"
             onMouseDown={(event) => event.stopPropagation()}
-            onKeyDown={trapCommandPaletteFocus}
+            onKeyDown={trapDialogFocus}
           >
             <div className="command-palette-heading">
               <h2 id="command-palette-title">Workspace commands</h2>
@@ -2695,6 +3403,7 @@ function App() {
                   key={command.id}
                   type="button"
                   disabled={command.disabled}
+                  aria-keyshortcuts={command.shortcut?.replace('Ctrl+', 'Control+')}
                   onClick={() => {
                     command.run()
                     closeCommandPalette()

@@ -73,24 +73,61 @@ chalk-white surfaces, ink typography, and restrained vermilion selections and ac
 The light appearance stays consistent even when the operating system prefers dark mode.
 
 - Sessions and provider controls stay in the left sidebar.
+- Command-palette actions independently collapse either sidebar: **Alt+V** for the left,
+  **Ctrl+Alt+V** for the right. No dedicated header buttons; runs, drafts, and approvals stay intact.
+- Model switching uses a compact in-app picker. **Manage providers** opens a centered
+  dialog with profile inspection, grouped actions, and connectivity history without
+  resizing the sidebar or switching the active model.
+- Provider identities use distinct Foundry diamond and local cube symbols with accessible
+  labels. Visible names omit redundant provider-type prefixes; stored profile names are unchanged.
+  The sidebar shows one identity block, omitting the model subtitle when it duplicates the name.
 - Conversation occupies the center, with **Plan / Execute** in the top bar for single-provider
   sessions. Counsel & Craft retains its existing mode behavior.
+- Each user prompt offers **Run again** and **Edit & rerun**. Running again submits the same
+  prompt in the current session; editing loads it into the composer and waits for you to send.
+  Existing work is not rolled back, and running-state and approval gates still apply.
 - Current activity, tasks, memory, artifacts, and event inspection stay in the right panel.
+- **Output summary** describes indexed files with file-type and programming-language counts,
+  recorded size, and available versions. Filename browsing, previews, downloads, and version
+  selection are tucked behind **Inspect files**. Languages come from current filename
+  extensions, not content analysis; missing metadata stays explicit. Workspace counts cover
+  the shared output index, not every file on disk.
+- **Counsel & Craft** uses a connected role rail and keyboard-accessible in-app Craft picker,
+  with model identities and data boundaries instead of stacked form cards. Pairing is explicitly
+  for new sessions; execution and approval rules are unchanged.
+- The main **Model provider** selector uses the same in-app picker: readable names, model IDs,
+  Foundry / Local labels, boundaries, and selected checkmarks, without native OS dropdowns.
+- Activity is a readable, newest-first timeline with outcomes, relevant facts, and next-step
+  guidance. Diagnostics and original payloads sit behind **Technical details** and
+  **Raw event payload** disclosures, rather than appearing as a JSON wall.
 - Permission requests remain immediately above the composer, with exact arguments, previews,
   and separate **Approve / Deny** controls. Pending approvals still block prompt submission.
 - Settings and command search use the same palette. Keyboard focus, reduced motion,
   forced-color support, and the stacked narrow-screen layout are retained.
 - A quiet **Powered by Microsoft Agent Framework** attribution is centered at the bottom
   of the workspace across welcome, conversation, configuration, and settings views.
+- Notifications reserve space below the composer instead of floating across controls or
+  the inspector. Composer controls wrap without intersecting; at narrower desktop widths,
+  the inspector moves below the workspace instead of squeezing the conversation.
 
 The brighter vermilion is used for accents; filled actions use a slightly deeper shade so
 white button labels meet the WCAG AA normal-text contrast threshold.
 
 <details>
-  <summary>Approval and settings screenshots</summary>
+  <summary>Approval, settings, and provider screenshots</summary>
 
   <p><img src="docs/assets/prudence-approval.png" alt="Permission gate showing a synthetic diff and approval controls" width="100%"></p>
   <p><img src="docs/assets/prudence-settings.png" alt="Porcelain / Vermilion session settings with workspace and instruction controls" width="100%"></p>
+  <p><img src="docs/assets/prudence-provider-menu.png" alt="Centered provider manager with profile selection, grouped actions, and connectivity history" width="100%"></p>
+  <p><img src="docs/assets/prudence-provider-empty.png" alt="Empty provider manager dialog with add and import available" width="100%"></p>
+  <p><img src="docs/assets/prudence-activity.png" alt="Parsed activity timeline showing a run failure, next-step guidance, and a tool request" width="320"></p>
+  <p><img src="docs/assets/prudence-notice.png" alt="Run-error notification in its own workspace row, separate from the composer and activity inspector" width="100%"></p>
+  <p><img src="docs/assets/prudence-output-summary.png" alt="Output summary showing indexed-file counts, file types, programming languages, recorded size, and available versions without listing filenames" width="100%"></p>
+  <p><img src="docs/assets/prudence-counsel-craft.png" alt="Compact Counsel and Craft pairing rail with model identities, pairing state, and data boundary" width="100%"></p>
+  <p><img src="docs/assets/prudence-craft-picker.png" alt="In-app Craft picker with local model options, boundary labels, and a selected checkmark" width="100%"></p>
+  <p><img src="docs/assets/prudence-provider-picker.png" alt="In-app model provider picker with compact names, distinct Foundry and local symbols, model IDs, boundaries, and a selected checkmark" width="100%"></p>
+  <p><img src="docs/assets/prudence-focused-workspace.png" alt="Expanded conversation workspace with both side panels collapsed, restored through commands or pane shortcuts" width="100%"></p>
+  <p><img src="docs/assets/prudence-panel-commands.png" alt="Command palette showing independent pane collapse actions with Alt+V and Ctrl+Alt+V shortcuts" width="100%"></p>
 </details>
 
 All screenshots above are real browser captures using synthetic fixtures, without real
