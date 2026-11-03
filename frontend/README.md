@@ -47,14 +47,54 @@ than interpreting every vermilion element as an error. Code previews use warm li
 with dark monospace text. Keep new component colors token-based.
 
 The visual treatment uses compact editorial headings, warm rules, restrained shadows,
-and mostly 8-10px control corners. The existing brand asset is shown in grayscale in the
-sidebar; the source image is unchanged.
+and mostly 8-10px control corners. The **Layered panes** brand mark uses balanced ink
+outlines, taupe connectors, and a vermilion front edge to convey transparency.
+[public/prudence-icon.svg](public/prudence-icon.svg) is the shared vector source for the
+default persona in the sidebar and welcome area, the radial dial's reset option, the
+favicon, and the repository README. Keep its embedded palette aligned with the shared
+theme tokens: standalone SVG images cannot inherit the surrounding page's CSS variables.
+Do not apply grayscale filters or replace it with a raster crop of the concept sheet.
+
+The symbol-only persona dial is implemented in [src/PersonaDial.tsx](src/PersonaDial.tsx).
+[src/personas.ts](src/personas.ts) defines the task briefs and editable starting prompts.
+Selection changes browser-local UI guidance, not model selection, hidden agent instructions,
+or approval rules. Arrow keys navigate, Enter/Space selects, and Escape dismisses safely.
+Creating a session sends `persona_id` alongside the existing provider pairing. The session
+list renders this immutable creation metadata, not the current dial preference. SQLite
+migration leaves older sessions unrecorded; legacy archives also retain an explicit unknown
+persona instead of guessing. Opening a session does not change the current UI preference.
+
+Session/provider deletion and both draft-replacement paths share the themed
+`ConfirmationDialog` in [src/App.tsx](src/App.tsx). It uses a styled HTML dialog in the
+page, not `window.confirm`, `window.alert`, or `window.prompt`. Cancel is focused first;
+Tab stays inside, Escape and backdrop clicks cancel, and workspace shortcuts are
+suspended. Pending actions disable both buttons; errors remain visible for retry.
+Focus restoration runs in a post-render layout effect so deleting the trigger's session row
+returns focus to a surviving workspace control. Draft confirmation never sends a prompt.
+Do not introduce native browser confirmations or dropdowns. OS file-import and workspace
+directory pickers remain intentional filesystem interactions, not application confirmations.
 
 Single-provider sessions expose the existing Plan / Execute actions in the top bar.
 Counsel & Craft does not gain a manual mode switch. Approval placement, write-access
 permissions, auto-approve behavior, API contracts, and session persistence are unchanged.
 The **Powered by Microsoft Agent Framework** attribution sits at the bottom center of the
 main workspace on every view, rather than inside the welcome content.
+
+Message headings format persisted `created_at` values in the browser's locale and time zone,
+with seconds and a zone label; the `<time datetime>` retains the original ISO timestamp.
+Live headings explicitly identify run-start time rather than inventing message creation time.
+Partial answers remain labeled after failures. [src/messageTelemetry.ts](src/messageTelemetry.ts)
+associates user/agent messages with their recorded run, including approval continuations.
+Expandable **Run details** shows that run's model identity, input/output token reports,
+wall-clock elapsed time, tool requests, report count, and recorded outcome. Later runs and
+provider selection must not rewrite historical statistics.
+
+Token counts are main-model report totals, not per-message billing or combined Craft/subagent
+usage. Elapsed includes approval waits and completion work, not just inference. Tool requests
+count attempts, not successful results. Missing or invalid usage stays unknown, and true zero
+stays zero; an unknown context percentage has no zero-filled meter. Legacy events without run
+metadata are labeled unrecorded. Do not add estimated costs or tokens/second without verified
+pricing and inference-specific timing data.
 
 Provider management uses an icon-led model selector and a small **Add provider** control
 in its heading. **Manage providers** opens a centered, 680px native modal dialog with a bounded
@@ -241,6 +281,9 @@ npm run screenshots
 This runs only the documentation capture cases and overwrites:
 
 - [Workspace](../docs/assets/prudence-app.png), 1440 x 1000.
+- [Persona dial](../docs/assets/prudence-persona-dial.png), symbol-only choices and the Layered panes reset icon.
+- [Delete confirmation](../docs/assets/prudence-delete-confirmation.png), themed destructive-action dialog.
+- [Session personas](../docs/assets/prudence-session-personas.png), creation-persona symbols in the sidebar.
 - [Focused workspace](../docs/assets/prudence-focused-workspace.png), both side panels collapsed.
 - [Pane commands](../docs/assets/prudence-panel-commands.png), palette actions and shortcut hints.
 - [Permission gate](../docs/assets/prudence-approval.png), 1440 x 1200.

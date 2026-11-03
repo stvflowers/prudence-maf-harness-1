@@ -145,9 +145,22 @@ class ProviderConfigurationImport(BaseModel):
     profiles: list[ProviderProfileCreate] = Field(max_length=50)
 
 
+type PersonaId = Literal[
+    "default",
+    "engineer",
+    "intelligence",
+    "blogger",
+    "social",
+    "presentations",
+    "markdown",
+    "learning",
+]
+
+
 class SessionCreate(BaseModel):
     provider_id: str
     craft_provider_id: str | None = None
+    persona_id: PersonaId = "default"
     title: str = Field(default="New session", min_length=1, max_length=120)
 
 
@@ -173,6 +186,7 @@ class SessionSummary(BaseModel):
     id: str
     provider_id: str
     craft_provider_id: str | None
+    persona_id: PersonaId | None = None
     title: str
     created_at: datetime
     updated_at: datetime
@@ -390,9 +404,7 @@ class MemoryCreate(BaseModel):
     def validate_file_name(cls, value: str) -> str:
         normalized = value.strip()
         reserved_stems = {"CON", "PRN", "AUX", "NUL"} | {
-            f"{prefix}{number}"
-            for prefix in ("COM", "LPT")
-            for number in range(1, 10)
+            f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
         }
         stem = normalized.split(".", maxsplit=1)[0].upper()
         if (
@@ -430,6 +442,7 @@ class SessionArchiveArtifact(BaseModel):
 class SessionArchive(BaseModel):
     schema_version: Literal[1] = 1
     title: str = Field(min_length=1, max_length=120)
+    persona_id: PersonaId | None = None
     source_provider: ProviderProfileCreate
     events: list[SessionArchiveEvent] = Field(max_length=10_000)
     memories: list[MemoryEntry] = Field(max_length=100)

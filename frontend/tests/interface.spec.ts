@@ -1,5 +1,9 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { personas, personaStorageKey } from '../src/personas'
+import type { PersonaId } from '../src/personas'
+import { elapsedRunTime, messageTelemetry, messageTimestamp } from '../src/messageTelemetry'
+import type { HarnessEvent } from '../src/messageTelemetry'
 
 const assets = fileURLToPath(new URL('../../docs/assets/', import.meta.url))
 
@@ -96,6 +100,7 @@ async function openSample(
   pendingApproval = false,
   outputs: ReturnType<typeof sampleArtifact>[] = [],
   providers = [sampleProvider('sample-local', 'Local model', 'local', 'local-code', 'machine')],
+  creationPersona: PersonaId | null = 'default',
 ) {
   const provider = providers[0]
   if (!provider) throw new Error('The sample session requires a provider')
@@ -103,6 +108,7 @@ async function openSample(
     id: 'sample-session',
     provider_id: provider.id,
     craft_provider_id: null,
+    persona_id: creationPersona,
     title: 'Refactor authentication',
     created_at: '2026-11-02T14:00:00Z',
     updated_at: '2026-11-02T14:12:00Z',
@@ -171,15 +177,18 @@ async function openSample(
   const providerRequests: string[] = []
   const historyReads: string[] = []
   const sampleSessions: Array<Omit<typeof session, 'craft_provider_id'> & { craft_provider_id: string | null }> = [session]
-  const sessionCreations: { provider_id: string; craft_provider_id: string | null; title: string }[] = []
+  const sessionCreations: { provider_id: string; craft_provider_id: string | null; persona_id: PersonaId; title: string }[] = []
+  const sessionDeletes: string[] = []
+  const sessionDeleteFailures: Record<string, string> = {}
   const decisions: unknown[] = []
   const modelRequests: string[] = []
   const artifactReads: string[] = []
   let startRun: () => void = () => { throw new Error('Fixture stream not connected') }
-  let sendActivity: (type: string, payload: Record<string, unknown>) => void = () => {
+  let sendActivity: (type: string, payload: Record<string, unknown>, createdAt?: string) => void = () => {
     throw new Error('Fixture stream not connected')
   }
   let sendError: (message: string) => void = () => { throw new Error('Fixture stream not connected') }
+  let sendDelta: (content: string) => void = () => { throw new Error('Fixture stream not connected') }
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url())
     const requestedSession = sampleSessions.find((entry) =>
@@ -224,6 +233,16 @@ async function openSample(
       body = created
     }
     else if (path === '/api/sessions') body = sampleSessions
+    else if (path === '/api/sessions/sample-session' && method === 'DELETE' && requestedSession) {
+      sessionDeletes.push(requestedSession.id)
+      if (sessionDeleteFailures[requestedSession.id]) {
+        await route.fulfill({ status: 409, json: { detail: sessionDeleteFailures[requestedSession.id] } })
+        return
+      }
+      sampleSessions.splice(sampleSessions.findIndex((entry) => entry.id === requestedSession.id), 1)
+      await route.fulfill({ status: 204 })
+      return
+    }
     else if (path === '/api/sessions/sample-session') body = requestedSession
     else if (path === '/api/sessions/sample-session/state') body = state
     else if (path === '/api/sessions/sample-session/mode' && method === 'PUT') {
@@ -263,7 +282,7 @@ async function openSample(
   await page.routeWebSocket('**/api/sessions/*/stream', (socket) => {
     socket.onMessage((message) => modelRequests.push(String(message)))
     let eventId = 3
-    sendActivity = (type, payload) => socket.send(JSON.stringify({
+    sendActivity = (type, payload, createdAt = '2026-11-02T14:02:00Z') => socket.send(JSON.stringify({
       type: 'event',
       event: {
         id: eventId,
@@ -271,11 +290,12 @@ async function openSample(
         sequence: eventId++,
         type,
         payload,
-        created_at: '2026-11-02T14:02:00Z',
+        created_at: createdAt,
       },
     }))
     startRun = () => sendActivity('run_started', {})
     sendError = (message) => socket.send(JSON.stringify({ type: 'error', payload: { message } }))
+    sendDelta = (content) => socket.send(JSON.stringify({ type: 'assistant_delta', payload: { content } }))
   })
   await page.goto('/')
   await page.getByRole('button', { name: /^Refactor authentication/ }).click()
@@ -284,8 +304,508 @@ async function openSample(
   )
   await expect(page.locator('.connection')).toHaveText('Connected')
   await expect(page.getByText('Powered by Microsoft Agent Framework', { exact: true })).toHaveCount(1)
-  return { unexpectedRequests, decisions, modelRequests, artifactReads, sessionCreations, histories, probeFailures, historyFailures, providerRequests, historyReads, startRun, sendActivity, sendError }
+  return { unexpectedRequests, decisions, modelRequests, artifactReads, sessionCreations, sessionDeletes, sessionDeleteFailures, histories, probeFailures, historyFailures, providerRequests, historyReads, startRun, sendActivity, sendError, sendDelta }
 }
+
+function telemetryEvent(id: number, type: string, payload: Record<string, unknown> = {}): HarnessEvent {
+  return { id, session_id: 'telemetry-session', sequence: id, type, payload, created_at: new Date(Date.UTC(2026, 10, 2, 14, 0, id)).toISOString() }
+}
+
+function emitMeasuredRun(fixture: Awaited<ReturnType<typeof openSample>>, model = 'recorded-main-model') {
+  fixture.sendActivity('user_message', { content: 'Measured prompt for the agent' }, '2026-11-02T14:02:00Z')
+  fixture.sendActivity('run_started', { model, craft_model: 'recorded-craft-model' }, '2026-11-02T14:02:00.500Z')
+  fixture.sendActivity('tool_call', { name: 'read_file', arguments: { path: 'src/example.ts' } }, '2026-11-02T14:02:01Z')
+  fixture.sendActivity('context_usage', { input_tokens: 120, output_tokens: 30, context_limit: 1000, context_percent: 12 }, '2026-11-02T14:02:01.500Z')
+  fixture.sendActivity('assistant_message', { content: 'A measured answer from the agent.' }, '2026-11-02T14:02:02Z')
+  fixture.sendActivity('run_completed', {}, '2026-11-02T14:02:03Z')
+}
+
+test('message telemetry scopes model, tokens and outcome to each prompt run', () => {
+  const events = [
+    telemetryEvent(1, 'user_message'),
+    telemetryEvent(2, 'run_started', { model: 'first-model' }),
+    telemetryEvent(3, 'context_usage', { input_tokens: 12, output_tokens: 3 }),
+    telemetryEvent(4, 'assistant_message'),
+    telemetryEvent(5, 'run_completed'),
+    telemetryEvent(6, 'user_message'),
+    telemetryEvent(7, 'run_started', { model: 'second-model' }),
+    telemetryEvent(8, 'context_usage', { input_tokens: 0, output_tokens: 0 }),
+    telemetryEvent(9, 'assistant_message'),
+    telemetryEvent(10, 'run_completed'),
+    telemetryEvent(11, 'context_usage', { input_tokens: 999, output_tokens: 999 }),
+    telemetryEvent(12, 'assistant_message'),
+  ]
+  const result = messageTelemetry(events)
+  expect(result.byMessage.get(1)).toMatchObject({ model: 'first-model', inputTokens: 12, outputTokens: 3, outcome: 'Completed' })
+  expect(result.byMessage.get(4)).toBe(result.byMessage.get(1))
+  expect(result.byMessage.get(6)).toMatchObject({ model: 'second-model', inputTokens: 0, outputTokens: 0, outcome: 'Completed' })
+  expect(result.byMessage.get(9)).toBe(result.byMessage.get(6))
+  expect(result.byMessage.has(12)).toBe(false)
+  expect(result.activeRun).toBeNull()
+})
+
+test('message telemetry aggregates approval-resumed reports without double-counting tool results', () => {
+  const result = messageTelemetry([
+    telemetryEvent(1, 'user_message'),
+    telemetryEvent(2, 'run_started', { model: 'counsel', craft_model: 'craft' }),
+    telemetryEvent(3, 'tool_call'),
+    telemetryEvent(4, 'context_usage', { input_tokens: 80, output_tokens: 4 }),
+    telemetryEvent(5, 'run_waiting_approval'),
+    telemetryEvent(6, 'approval_decided'),
+    telemetryEvent(7, 'tool_result'),
+    telemetryEvent(8, 'context_usage', { input_tokens: 50, output_tokens: 6 }),
+    telemetryEvent(9, 'assistant_message'),
+    telemetryEvent(10, 'run_completed'),
+  ])
+  const run = result.byMessage.get(1)
+  expect(run).toMatchObject({ inputTokens: 130, outputTokens: 10, usageSamples: 2, toolCalls: 1, craftModel: 'craft', outcome: 'Completed' })
+  if (!run) throw new Error('Expected recorded run')
+  expect(elapsedRunTime(run)).toBe('8.0 s')
+})
+
+test('message telemetry keeps missing and invalid usage distinct from recorded zero', () => {
+  const result = messageTelemetry([
+    telemetryEvent(1, 'user_message'),
+    telemetryEvent(2, 'run_started'),
+    telemetryEvent(3, 'context_usage', { input_tokens: 10 }),
+    telemetryEvent(4, 'context_usage', { input_tokens: 12, output_tokens: 5 }),
+    telemetryEvent(5, 'assistant_message'),
+    telemetryEvent(6, 'run_failed'),
+    telemetryEvent(7, 'user_message'),
+    telemetryEvent(8, 'run_started'),
+    telemetryEvent(9, 'context_usage', { input_tokens: -1, output_tokens: Number.POSITIVE_INFINITY }),
+    telemetryEvent(10, 'run_cancelled'),
+  ])
+  expect(result.byMessage.get(1)).toMatchObject({ inputTokens: 22, outputTokens: null, model: null, outcome: 'Failed' })
+  expect(result.byMessage.get(7)).toMatchObject({ inputTokens: null, outputTokens: null, outcome: 'Cancelled' })
+  expect(messageTelemetry([telemetryEvent(1, 'user_message'), telemetryEvent(2, 'assistant_message')]).byMessage.size).toBe(0)
+})
+
+test('message telemetry marks incomplete run boundaries and invalid timestamps explicitly', () => {
+  const result = messageTelemetry([
+    telemetryEvent(1, 'user_message'),
+    telemetryEvent(2, 'run_started', { model: 'incomplete-model' }),
+    telemetryEvent(3, 'assistant_message'),
+    telemetryEvent(4, 'user_message'),
+    telemetryEvent(5, 'run_started', { model: 'current-model' }),
+    telemetryEvent(6, 'run_waiting_approval'),
+  ])
+  expect(result.byMessage.get(1)?.outcome).toBe('End not recorded')
+  expect(result.byMessage.get(3)?.model).toBe('incomplete-model')
+  expect(result.activeRun?.outcome).toBe('Waiting for approval')
+  const current = result.activeRun
+  if (!current) throw new Error('Expected current run')
+  expect(elapsedRunTime(current)).toBeNull()
+  expect(elapsedRunTime({ ...current, endedAt: 'invalid' })).toBeNull()
+  expect(elapsedRunTime({ ...current, endedAt: '2020-01-01T00:00:00Z' })).toBeNull()
+  expect(elapsedRunTime({ ...current, endedAt: current.startedAt })).toBe('0 ms')
+  expect(elapsedRunTime({ ...current, endedAt: '2026-11-02T14:00:05.250Z' })).toBe('250 ms')
+  expect(elapsedRunTime({ ...current, endedAt: '2026-11-02T14:00:06.500Z' })).toBe('1.5 s')
+  expect(elapsedRunTime({ ...current, endedAt: '2026-11-02T14:01:05Z' })).toBe('1m 0s')
+  expect(messageTimestamp('invalid')).toBeNull()
+})
+
+test.describe('message timestamp time zone', () => {
+  test.use({ locale: 'en-US', timezoneId: 'America/Los_Angeles' })
+  test('message dates include seconds and the browser time zone while keeping original ISO timestamps', async ({ page }) => {
+    await openSample(page)
+    const userTime = page.locator('.message.user .message-heading time').first()
+    await expect(userTime).toHaveAttribute('datetime', '2026-11-02T14:00:00Z')
+    await expect(userTime).toHaveAttribute('title', 'Message recorded: 2026-11-02T14:00:00Z')
+    await expect(userTime).toContainText('Nov 2, 2026')
+    await expect(userTime).toContainText(/6:00:00\s+AM\s+PST/)
+    await expect(page.locator('.message.assistant .message-heading time')).toHaveAttribute('datetime', '2026-11-02T14:01:00Z')
+    await expect(page.locator('.message-stats-unavailable')).toHaveCount(2)
+  })
+})
+
+test('message run details show recorded metrics and do not switch to a later model or usage report', async ({ page }) => {
+  const fixture = await openSample(page)
+  emitMeasuredRun(fixture)
+  const user = page.locator('.message.user').filter({ hasText: 'Measured prompt for the agent' })
+  const assistant = page.locator('.message.assistant').filter({ hasText: 'A measured answer from the agent.' })
+  await expect(assistant).toBeVisible()
+  await expect(user.locator('.message-heading time')).toHaveAttribute('datetime', '2026-11-02T14:02:00Z')
+  await expect(assistant.locator('.message-heading time')).toHaveAttribute('datetime', '2026-11-02T14:02:02Z')
+  await expect(user.locator('.message-run-stats summary')).toContainText('Completed')
+  await expect(user.locator('.message-run-stats summary')).toContainText('2.5 s')
+  await expect(user.locator('.message-run-stats summary')).toContainText('1 tool request')
+  await user.locator('.message-run-stats summary').click()
+  await expect(user.locator('.message-run-stats dd')).toHaveText(['recorded-main-model', 'recorded-craft-model', '2.5 s', '120', '30', '1', '1'])
+  fixture.sendActivity('user_message', { content: 'A second independent prompt' }, '2026-11-02T14:03:00Z')
+  fixture.sendActivity('run_started', { model: 'later-model' }, '2026-11-02T14:03:01Z')
+  fixture.sendActivity('context_usage', { input_tokens: 0, output_tokens: 0 }, '2026-11-02T14:03:02Z')
+  fixture.sendActivity('assistant_message', { content: 'Second independent answer' }, '2026-11-02T14:03:03Z')
+  fixture.sendActivity('run_completed', {}, '2026-11-02T14:03:04Z')
+  const second = page.locator('.message.assistant').filter({ hasText: 'Second independent answer' })
+  await second.locator('.message-run-stats summary').click()
+  await expect(second.locator('.message-run-stats dd')).toHaveText(['later-model', '3.0 s', '0', '0', '1', '0'])
+  await expect(user.locator('.message-run-stats dd')).toHaveText(['recorded-main-model', 'recorded-craft-model', '2.5 s', '120', '30', '1', '1'])
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('streaming and partial messages distinguish run start time, unknown usage and failed outcomes', async ({ page }) => {
+  const fixture = await openSample(page)
+  fixture.sendActivity('user_message', { content: 'A streamed prompt' }, '2026-11-02T14:04:00Z')
+  fixture.sendActivity('run_started', { model: 'streamed-model' }, '2026-11-02T14:04:01Z')
+  fixture.sendDelta('A partial streamed answer')
+  const live = page.locator('.message.assistant').filter({ has: page.locator('.cursor') })
+  await expect(live.locator('.message-heading')).toContainText('Streaming')
+  await expect(live.locator('.message-heading time')).toHaveAttribute('title', 'Run started: 2026-11-02T14:04:01Z')
+  fixture.sendActivity('context_usage', { output_tokens: 7, context_limit: 1000 }, '2026-11-02T14:04:02Z')
+  await live.locator('.message-run-stats summary').click()
+  await expect(live.locator('.message-run-stats dd')).toHaveText(['streamed-model', 'In progress', 'Not reported', '7', '1', '0'])
+  await expect(page.locator('.usage-meter')).not.toBeVisible()
+  fixture.sendActivity('assistant_message', { content: 'A partial streamed answer', partial: true }, '2026-11-02T14:04:03Z')
+  fixture.sendActivity('run_failed', { message: 'Synthetic failure' }, '2026-11-02T14:04:04Z')
+  const partial = page.locator('.message.assistant').filter({ hasText: 'A partial streamed answer' })
+  await expect(partial.locator('.message-heading')).toContainText('Partial response')
+  await expect(partial.locator('.message-heading time')).toHaveAttribute('title', 'Message recorded: 2026-11-02T14:04:03Z')
+  await expect(partial.locator('.message-run-stats summary')).toContainText('Failed')
+  expect(fixture.modelRequests).toEqual([])
+})
+
+test('message timestamps and expanded run statistics stay contained in compact layouts', async ({ page }) => {
+  const fixture = await openSample(page)
+  emitMeasuredRun(fixture, 'a-very-long-recorded-model-'.repeat(15))
+  const message = page.locator('.message.user').filter({ hasText: 'Measured prompt for the agent' })
+  await message.locator('.message-run-stats summary').click()
+  for (const width of [1440, 820, 390]) {
+    await page.setViewportSize({ width, height: 800 })
+    const body = message.locator(':scope > div').last()
+    await expectContained(message.locator('.message-heading'), body)
+    await expectContained(message.locator('.message-heading time'), body)
+    await expectContained(message.locator('.message-run-stats'), body)
+    await expectNoOverlap(message.locator('.message-heading strong'), message.locator('.message-heading time'))
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+})
+
+test('persona dial provides seven symbol-only choices, restores default, and persists selection', async ({ page }) => {
+  await openWelcome(page)
+  const trigger = page.locator('.brand-mark')
+  await expect(trigger.locator('img')).toHaveAttribute('src', '/prudence-icon.svg')
+  for (const persona of personas) {
+    await trigger.click()
+    const menu = page.getByRole('menu', { name: 'Choose persona', exact: true })
+    await expect(menu.getByRole('menuitemradio')).toHaveCount(8)
+    await expect(menu).toHaveText('')
+    const option = menu.getByRole('menuitemradio', { name: persona.name, exact: true })
+    await expect(option.locator('svg')).toHaveCount(1)
+    await option.click()
+    await expect(menu).not.toBeVisible()
+    await expect(trigger).toBeFocused()
+    await expect(page.locator('.empty-state h2')).toHaveText(persona.heading)
+    await expect(page.locator('.brand')).toContainText(persona.name)
+  }
+  await page.reload()
+  await expect(trigger).toHaveAttribute('aria-label', 'Choose persona: Learning Coach')
+  await trigger.click()
+  await expect(page.getByRole('menuitemradio', { name: 'Learning Coach', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('menuitemradio', { name: 'Prudence default', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Your local agent workspace' })).toBeVisible()
+  await expect(trigger.locator('img')).toBeVisible()
+  await page.reload()
+  await expect(trigger).toHaveAttribute('aria-label', 'Choose persona: Prudence default')
+})
+
+test('persona dial supports keyboard navigation and safe dismissal during a run', async ({ page }) => {
+  const fixture = await openSample(page)
+  const trigger = page.locator('.brand-mark')
+  await trigger.focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(page.getByRole('menuitemradio', { name: 'Prudence default', exact: true })).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByRole('menuitemradio', { name: 'Software Engineer', exact: true })).toBeFocused()
+  await page.keyboard.press('End')
+  await page.keyboard.press('Space')
+  await expect(trigger).toHaveAttribute('aria-label', 'Choose persona: Learning Coach')
+  fixture.startRun()
+  await expect(page.getByRole('button', { name: 'Stop run' })).toBeEnabled()
+  await trigger.click()
+  await page.keyboard.press('Escape')
+  await expect(trigger).toBeFocused()
+  await expect(page.getByRole('menu')).not.toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop run' })).toBeEnabled()
+  await trigger.click()
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('menu')).not.toBeVisible()
+  await trigger.click()
+  await page.getByRole('heading', { name: 'Refactor authentication', exact: true }).click()
+  await expect(page.getByRole('menu')).not.toBeVisible()
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('personas tailor composer guidance without replacing drafts or sending hidden prompts', async ({ page }) => {
+  const fixture = await openSample(page)
+  const composer = page.getByRole('textbox', { name: 'Message the agent' })
+  await composer.fill('Keep this draft')
+  for (const persona of personas) {
+    await page.locator('.brand-mark').click()
+    await page.getByRole('menuitemradio', { name: persona.name, exact: true }).click()
+    await expect(composer).toHaveValue('Keep this draft')
+    await expect(composer).toHaveAttribute('placeholder', persona.placeholder)
+    await expect(page.locator('.persona-brief')).toContainText(persona.description)
+    for (const action of persona.actions) {
+      await expect(page.getByRole('button', { name: action, exact: true })).toBeEnabled()
+    }
+  }
+  await page.getByRole('button', { name: 'Set a learning goal', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Replace draft?' }).getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(composer).toHaveValue('Keep this draft')
+  await page.getByRole('button', { name: 'Set a learning goal', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Replace draft?' }).getByRole('button', { name: 'Replace draft', exact: true }).click()
+  await expect(composer).toHaveValue(personas[6].starters[0])
+  await expect(composer).toBeFocused()
+  expect(fixture.modelRequests).toEqual([])
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect.poll(() => fixture.modelRequests.length).toBe(1)
+  expect(JSON.parse(fixture.modelRequests[0])).toEqual({ type: 'prompt', content: personas[6].starters[0] })
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('persona changes preserve approvals and model selection', async ({ page }) => {
+  const fixture = await openSample(page, true)
+  await page.locator('.brand-mark').click()
+  await page.getByRole('menuitemradio', { name: 'Learning Coach', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Message the agent' })).toHaveAttribute('placeholder', 'Resolve the pending approval before continuing...')
+  await expect(page.getByRole('button', { name: 'Set a learning goal', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+  await expect(page.getByRole('heading', { name: 'Proposed changes' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Active model provider', exact: true })).toContainText('model')
+  expect(fixture.decisions).toEqual([])
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('persona dial stays inside narrow and short viewports with distinct touch targets', async ({ page }) => {
+  await openWelcome(page)
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 760, height: 640 }, { width: 320, height: 600 }]) {
+    await page.setViewportSize(viewport)
+    for (const trigger of [page.locator('.brand-mark'), page.locator('.persona-prominent')]) {
+      await trigger.click()
+      const menu = page.getByRole('menu', { name: 'Choose persona', exact: true })
+      const bounds = await menu.boundingBox()
+      if (!bounds) throw new Error('Persona menu has no bounds')
+      expect(bounds.x).toBeGreaterThanOrEqual(0)
+      expect(bounds.y).toBeGreaterThanOrEqual(0)
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width)
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height)
+      const options = menu.getByRole('menuitemradio')
+      const optionBounds = await options.evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect()
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      }))
+      for (const [index, a] of optionBounds.entries()) {
+        expect(a.width).toBeGreaterThanOrEqual(44)
+        expect(a.height).toBeGreaterThanOrEqual(44)
+        expect(a.x).toBeGreaterThanOrEqual(bounds.x)
+        expect(a.y).toBeGreaterThanOrEqual(bounds.y)
+        expect(a.x + a.width).toBeLessThanOrEqual(bounds.x + bounds.width)
+        expect(a.y + a.height).toBeLessThanOrEqual(bounds.y + bounds.height)
+        for (const b of optionBounds.slice(index + 1)) {
+          const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+          const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+          expect(width <= 1 || height <= 1).toBe(true)
+        }
+      }
+      await expect(menu).toHaveCSS('animation-name', 'none')
+      await page.keyboard.press('Escape')
+    }
+  }
+})
+
+test('persona task briefs preserve compact composer and approval layouts', async ({ page }) => {
+  const fixture = await openSample(page, true)
+  await page.locator('.brand-mark').click()
+  await page.getByRole('menuitemradio', { name: 'Learning Coach', exact: true }).click()
+  for (const [width, height] of [[1440, 1000], [1024, 420], [761, 600], [390, 800]]) {
+    await page.setViewportSize({ width, height })
+    await expectContained(page.locator('.persona-brief'), page.locator('main'))
+    await expectContained(page.locator('.composer'), page.locator('main'))
+    await expectNoOverlap(page.locator('.persona-brief'), page.locator('.approval-tray'))
+    await expectNoOverlap(page.locator('.approval-tray'), page.locator('.composer'))
+    await expectNoOverlap(page.locator('.composer'), page.locator('.framework-credit'))
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+  await page.locator('.persona-brief summary').click()
+  await expect(page.getByRole('button', { name: 'Set a learning goal', exact: true })).not.toBeVisible()
+  await page.locator('.persona-brief summary').click()
+  await expect(page.getByRole('button', { name: 'Set a learning goal', exact: true })).toBeVisible()
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('invalid saved persona preferences are surfaced explicitly', async ({ page }) => {
+  await page.addInitScript((key) => localStorage.setItem(key, 'unsupported'), personaStorageKey)
+  await openWelcome(page)
+  await expect(page.getByRole('status').filter({ hasText: 'The saved persona is not supported' })).toBeVisible()
+})
+
+test('layered panes SVG is shared by default persona surfaces and the favicon without grayscale filters', async ({ page, request }) => {
+  await openWelcome(page)
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/prudence-icon.svg')
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('type', 'image/svg+xml')
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f6f2eb')
+  const asset = await request.get('/prudence-icon.svg')
+  expect(asset.ok()).toBe(true)
+  expect(asset.headers()['content-type']).toContain('image/svg+xml')
+  const svg = await asset.text()
+  expect(svg).toContain('Prudence layered panes')
+  expect(svg).not.toContain('stroke-dasharray')
+  await page.locator('.persona-prominent').click()
+  const images = page.locator('.persona-trigger img, .persona-default img')
+  await expect(images).toHaveCount(3)
+  for (const image of await images.all()) {
+    await expect(image).toHaveAttribute('src', '/prudence-icon.svg')
+    await expect(image).toHaveCSS('filter', 'none')
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true)
+  }
+  await page.getByRole('menuitemradio', { name: 'Prudence default', exact: true }).click()
+  await expect(page.locator('.persona-prominent')).toHaveAttribute('aria-label', 'Choose persona: Prudence default')
+})
+
+test('session deletion uses a themed confirmation with cancel, Escape, focus containment and no native dialogs', async ({ page }) => {
+  const nativeDialogs: string[] = []
+  page.on('dialog', async (dialog) => { nativeDialogs.push(dialog.type()); await dialog.dismiss() })
+  const fixture = await openSample(page)
+  const trigger = page.getByRole('button', { name: 'Delete session Refactor authentication', exact: true })
+  await trigger.click()
+  const dialog = page.getByRole('alertdialog', { name: 'Delete session?', exact: true })
+  const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true })
+  const confirm = dialog.getByRole('button', { name: 'Delete session', exact: true })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('Files in a bound workspace will not be deleted.')
+  await expect(dialog).toHaveCSS('background-color', 'rgb(255, 253, 250)')
+  await expect(cancel).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(confirm).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(cancel).toBeFocused()
+  await page.keyboard.press('Control+k')
+  await expect(page.getByRole('dialog', { name: 'Workspace commands' })).not.toBeVisible()
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 420 }]) {
+    await page.setViewportSize(viewport)
+    const bounds = await dialog.boundingBox()
+    if (!bounds) throw new Error('Confirmation dialog has no bounds')
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.y).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height)
+    await expectContained(cancel, dialog)
+    await expectContained(confirm, dialog)
+    await expectNoOverlap(cancel, confirm)
+  }
+  await page.keyboard.press('Escape')
+  await expect(dialog).not.toBeVisible()
+  await expect(trigger).toBeFocused()
+  await trigger.click()
+  await cancel.click()
+  await expect(trigger).toBeFocused()
+  expect(fixture.sessionDeletes).toEqual([])
+  await trigger.click()
+  await confirm.click()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByRole('navigation', { name: 'Sessions' })).toContainText('No sessions yet.')
+  await expect(page.getByRole('button', { name: /^Commands/ })).toBeFocused()
+  expect(fixture.sessionDeletes).toEqual(['sample-session'])
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+  expect(nativeDialogs).toEqual([])
+})
+
+test('failed session deletion stays in the confirmation dialog and supports an explicit retry', async ({ page }) => {
+  const fixture = await openSample(page)
+  fixture.sessionDeleteFailures['sample-session'] = 'Synthetic deletion conflict: session is running.'
+  await page.getByRole('button', { name: 'Delete session Refactor authentication', exact: true }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Delete session?', exact: true })
+  await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText('Synthetic deletion conflict: session is running.')
+  await expect(page.locator('.session-item')).toHaveCount(1)
+  await expect(dialog.getByRole('button', { name: 'Delete session', exact: true })).toBeEnabled()
+  delete fixture.sessionDeleteFailures['sample-session']
+  await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
+  await expect(dialog).not.toBeVisible()
+  expect(fixture.sessionDeletes).toEqual(['sample-session', 'sample-session'])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('pending session deletion prevents duplicate submits and cannot be dismissed mid-request', async ({ page }) => {
+  const fixture = await openSample(page)
+  let finish: () => void = () => { throw new Error('Delete request not waiting') }
+  const waiting = new Promise<void>((resolve) => { finish = resolve })
+  await page.route('**/api/sessions/sample-session', async (route) => {
+    if (route.request().method() === 'DELETE') await waiting
+    await route.fallback()
+  })
+  await page.getByRole('button', { name: 'Delete session Refactor authentication', exact: true }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Delete session?', exact: true })
+  await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
+  await expect(dialog).toHaveAttribute('aria-busy', 'true')
+  await expect(dialog.getByRole('button', { name: 'Working...', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeVisible()
+  finish()
+  await expect(dialog).not.toBeVisible()
+  expect(fixture.sessionDeletes).toEqual(['sample-session'])
+})
+
+test('confirmation Escape never cancels a running agent', async ({ page }) => {
+  const fixture = await openSample(page)
+  await page.getByRole('textbox', { name: 'Message the agent' }).fill('Keep this draft')
+  await page.getByRole('button', { name: 'Edit & rerun', exact: true }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Replace draft?', exact: true })
+  fixture.startRun()
+  await expect(page.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('session list records every creation persona and never follows later dial changes', async ({ page }) => {
+  const fixture = await openSample(page)
+  const nav = page.getByRole('navigation', { name: 'Sessions' })
+  await expect(nav.getByRole('img', { name: 'Created as Prudence default', exact: true }).locator('img')).toHaveAttribute('src', '/prudence-icon.svg')
+  for (const persona of personas) {
+    await page.locator('.brand-mark').click()
+    await page.getByRole('menuitemradio', { name: persona.name, exact: true }).click()
+    await page.getByRole('button', { name: 'New session', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'New session', exact: true })).toBeVisible()
+    await expect(nav.getByRole('img', { name: `Created as ${persona.name}`, exact: true })).toBeVisible()
+    expect(fixture.sessionCreations.at(-1)?.persona_id).toBe(persona.id)
+  }
+  await page.locator('.brand-mark').click()
+  await page.getByRole('menuitemradio', { name: 'Prudence default', exact: true }).click()
+  await page.reload()
+  for (const persona of personas) {
+    const icon = nav.getByRole('img', { name: `Created as ${persona.name}`, exact: true })
+    await expect(icon).toHaveCount(1)
+    await expect(icon.locator('svg path')).toHaveAttribute('d', persona.symbol)
+  }
+  await expect(nav.locator('.session-item')).toHaveCount(8)
+  for (const width of [1440, 761, 390]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const row of await nav.locator('.session-row').all()) {
+      await expectContained(row.locator('.session-persona'), row)
+      await expectNoOverlap(row.locator('.session-persona'), row.locator('.session-copy'))
+      await expectNoOverlap(row.locator('.session-copy'), row.locator('.session-delete'))
+    }
+  }
+  expect(fixture.modelRequests).toEqual([])
+  expect(fixture.unexpectedRequests).toEqual([])
+})
+
+test('legacy session icons explicitly identify unrecorded creation personas', async ({ page }) => {
+  await openSample(page, false, [], undefined, null)
+  const nav = page.getByRole('navigation', { name: 'Sessions' })
+  await expect(nav.getByRole('img', { name: 'Creation persona not recorded', exact: true })).toBeVisible()
+  await expect(nav.getByRole('img', { name: 'Created as Prudence default', exact: true })).toHaveCount(0)
+})
 
 test('Craft picker supports keyboard selection and preserves new-session pairing payloads', async ({ page }) => {
   const fixture = await openSample(page, false, [], pairingProviders())
@@ -317,14 +837,14 @@ test('Craft picker supports keyboard selection and preserves new-session pairing
   await page.getByRole('button', { name: 'New session', exact: true }).click()
   await expect(page.getByRole('group', { name: 'Agent mode' })).toHaveCount(0)
   expect(fixture.sessionCreations).toEqual([{
-    provider_id: 'sample-foundry', craft_provider_id: 'sample-phi', title: 'New session',
+    provider_id: 'sample-foundry', craft_provider_id: 'sample-phi', persona_id: 'default', title: 'New session',
   }])
   await trigger.click()
   await page.getByRole('option', { name: /Counsel only/ }).click()
   await page.getByRole('button', { name: 'New session', exact: true }).click()
   await expect(page.getByRole('group', { name: 'Agent mode' })).toBeVisible()
   expect(fixture.sessionCreations[1]).toEqual({
-    provider_id: 'sample-foundry', craft_provider_id: null, title: 'New session',
+    provider_id: 'sample-foundry', craft_provider_id: null, persona_id: 'default', title: 'New session',
   })
   expect(fixture.unexpectedRequests).toEqual([])
   expect(fixture.modelRequests).toEqual([])
@@ -367,7 +887,7 @@ test('Craft picker makes missing local providers explicit', async ({ page }) => 
   await page.getByRole('button', { name: 'New session', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'New session', exact: true })).toBeVisible()
   expect(fixture.sessionCreations).toEqual([{
-    provider_id: 'sample-foundry', craft_provider_id: null, title: 'New session',
+    provider_id: 'sample-foundry', craft_provider_id: null, persona_id: 'default', title: 'New session',
   }])
   expect(fixture.unexpectedRequests).toEqual([])
 })
@@ -384,7 +904,7 @@ test('Craft pairing clears when Counsel changes to a non-Foundry provider', asyn
   await page.getByRole('button', { name: 'New session', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'New session', exact: true })).toBeVisible()
   expect(fixture.sessionCreations).toEqual([{
-    provider_id: 'sample-foundry', craft_provider_id: null, title: 'New session',
+    provider_id: 'sample-foundry', craft_provider_id: null, persona_id: 'default', title: 'New session',
   }])
   expect(fixture.unexpectedRequests).toEqual([])
 })
@@ -476,7 +996,7 @@ test('main provider picker uses in-app options and preserves provider selection 
   await page.getByRole('button', { name: 'New session', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'New session', exact: true })).toBeVisible()
   expect(fixture.sessionCreations).toEqual([{
-    provider_id: 'sample-phi', craft_provider_id: null, title: 'New session',
+    provider_id: 'sample-phi', craft_provider_id: null, persona_id: 'default', title: 'New session',
   }])
   await selectProvider(page, 'Foundry Counsel')
   await expect(page.locator('.pairing-state')).toHaveText('Counsel only')
@@ -1027,11 +1547,11 @@ test('edit and rerun protects drafts and waits for explicit submission', async (
   const original = await page.locator('.message.user p').first().innerText()
   const composer = page.getByRole('textbox', { name: 'Message the agent' })
   await composer.fill('Keep this draft')
-  page.once('dialog', (dialog) => dialog.dismiss())
   await page.getByRole('button', { name: 'Edit & rerun', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Replace draft?' }).getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(composer).toHaveValue('Keep this draft')
-  page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: 'Edit & rerun', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Replace draft?' }).getByRole('button', { name: 'Replace draft', exact: true }).click()
   await expect(composer).toHaveValue(original)
   await expect(composer).toBeFocused()
   expect(fixture.modelRequests).toEqual([])
@@ -1212,8 +1732,8 @@ test('editing and deleting other managed profiles preserve the selected model', 
   await trigger.click()
   dialog = page.getByRole('dialog', { name: 'Provider manager', exact: true })
   await dialog.locator('.provider-manager-list').getByRole('button', { name: /Renamed Qwen profile/ }).click()
-  page.once('dialog', (confirmation) => confirmation.accept())
   await dialog.getByRole('button', { name: 'Delete provider', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Delete provider?' }).getByRole('button', { name: 'Delete provider', exact: true }).click()
   await expect(page.locator('.notice')).toContainText('Provider profile deleted.')
   await expect(page.locator('.provider-selector strong')).toHaveText('Phi 3.5 Mini')
   expect(fixture.providerRequests).toEqual(['PUT sample-qwen', 'DELETE sample-qwen'])
@@ -1303,6 +1823,43 @@ test('primary actions and normal text meet WCAG AA contrast', async ({ page }) =
 test('workspace documentation screenshot @screenshots', async ({ page }) => {
   await openSample(page, false, mixedOutputs())
   await page.screenshot({ path: `${assets}prudence-app.png` })
+})
+
+test('message statistics documentation screenshot @screenshots', async ({ page }) => {
+  const fixture = await openSample(page)
+  emitMeasuredRun(fixture)
+  const message = page.locator('.message.assistant').filter({ hasText: 'A measured answer from the agent.' })
+  await message.locator('.message-run-stats summary').click()
+  await expect(message.locator('.message-run-stats dd').first()).toHaveText('recorded-main-model')
+  await message.screenshot({ path: `${assets}prudence-message-stats.png` })
+})
+
+test('persona dial documentation screenshot @screenshots', async ({ page }) => {
+  await openWelcome(page)
+  await page.locator('.persona-prominent').click()
+  const menu = page.getByRole('menu', { name: 'Choose persona', exact: true })
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(8)
+  await expect(page.locator('.persona-default img')).toHaveAttribute('src', '/prudence-icon.svg')
+  await menu.screenshot({ path: `${assets}prudence-persona-dial.png` })
+})
+
+test('delete confirmation documentation screenshot @screenshots', async ({ page }) => {
+  await openSample(page)
+  await page.getByRole('button', { name: 'Delete session Refactor authentication', exact: true }).click()
+  await page.getByRole('alertdialog', { name: 'Delete session?', exact: true }).screenshot({ path: `${assets}prudence-delete-confirmation.png` })
+})
+
+test('session personas documentation screenshot @screenshots', async ({ page }) => {
+  await openSample(page)
+  for (const persona of personas) {
+    await page.locator('.brand-mark').click()
+    await page.getByRole('menuitemradio', { name: persona.name, exact: true }).click()
+    await page.getByRole('button', { name: 'New session', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'New session', exact: true })).toBeVisible()
+  }
+  const nav = page.getByRole('navigation', { name: 'Sessions' })
+  await expect(nav.locator('.session-persona')).toHaveCount(8)
+  await nav.screenshot({ path: `${assets}prudence-session-personas.png` })
 })
 
 test('focused workspace documentation screenshot @screenshots', async ({ page }) => {

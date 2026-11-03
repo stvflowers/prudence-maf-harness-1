@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { isPersonaId, personas, personaStorageKey } from './personas'
+import { PersonaDial, PersonaSymbol } from './PersonaDial'
+import type { PersonaId } from './personas'
+import { elapsedRunTime, messageTelemetry, messageTimestamp, payloadNumber, payloadText } from './messageTelemetry'
+import type { HarnessEvent, RunTelemetry } from './messageTelemetry'
 import './App.css'
 
 type ProviderKind = 'foundry' | 'local'
@@ -130,18 +135,15 @@ type SessionSummary = {
   id: string
   provider_id: string
   craft_provider_id: string | null
+  persona_id: PersonaId | null
   title: string
   created_at: string
   updated_at: string
 }
 
-type HarnessEvent = {
-  id: number
-  session_id: string
-  sequence: number
-  type: string
-  payload: Record<string, unknown>
-  created_at: string
+function sessionPersonaLabel(session: SessionSummary) {
+  if (session.persona_id == null) return 'Creation persona not recorded'
+  return `Created as ${session.persona_id === 'default' ? 'Prudence default' : personas.find((item) => item.id === session.persona_id)?.name}`
 }
 
 type SessionDetail = SessionSummary & { events: HarnessEvent[] }
@@ -367,16 +369,6 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
-}
-
-function payloadText(event: HarnessEvent, key: string): string | null {
-  const value = event.payload[key]
-  return typeof value === 'string' ? value : null
-}
-
-function payloadNumber(event: HarnessEvent, key: string): number | null {
-  const value = event.payload[key]
-  return typeof value === 'number' ? value : null
 }
 
 function payloadTasks(event: HarnessEvent): TaskItem[] | null {
@@ -1118,6 +1110,148 @@ function trapDialogFocus(event: ReactKeyboardEvent<HTMLElement>) {
   }
 }
 
+function MessageHeading({ author, timestamp, streaming = false, partial = false, runStarted = false }: {
+  author: string
+  timestamp?: string
+  streaming?: boolean
+  partial?: boolean
+  runStarted?: boolean
+}) {
+  const formatted = timestamp ? messageTimestamp(timestamp) : null
+  return (
+    <header className="message-heading">
+      <strong>{author}</strong>
+      {formatted && timestamp ? (
+        <time dateTime={timestamp} title={`${runStarted ? 'Run started' : 'Message recorded'}: ${timestamp}`}>
+          {runStarted && 'Started '}{formatted}
+        </time>
+      ) : <span className="message-time-unavailable">{runStarted ? 'Start time not recorded' : 'Timestamp unavailable'}</span>}
+      {streaming && <span className="message-badge">Streaming</span>}
+      {partial && <span className="message-badge">Partial response</span>}
+    </header>
+  )
+}
+
+function MessageRunStats({ run }: { run?: RunTelemetry | null }) {
+  if (!run) return <p className="message-stats-unavailable">Run stats not recorded</p>
+  const elapsed = elapsedRunTime(run)
+  return (
+    <details className="message-run-stats">
+      <summary>
+        Run details
+        <span>{run.outcome}</span>
+        {elapsed && <span>{elapsed}</span>}
+        <span>{run.toolCalls} tool {run.toolCalls === 1 ? 'request' : 'requests'}</span>
+      </summary>
+      <dl aria-label="Recorded run statistics">
+        <div><dt>Model</dt><dd>{run.model ?? 'Not recorded'}</dd></div>
+        {run.craftModel && <div><dt>Craft model</dt><dd>{run.craftModel}</dd></div>}
+        <div><dt>Elapsed</dt><dd>{elapsed ?? (run.outcome === 'Running' || run.outcome === 'Waiting for approval' ? 'In progress' : 'Not recorded')}</dd></div>
+        <div><dt>Input tokens</dt><dd>{run.inputTokens?.toLocaleString() ?? 'Not reported'}</dd></div>
+        <div><dt>Output tokens</dt><dd>{run.outputTokens?.toLocaleString() ?? 'Not reported'}</dd></div>
+        <div><dt>Usage reports</dt><dd>{run.usageSamples}</dd></div>
+        <div><dt>Tool requests</dt><dd>{run.toolCalls}</dd></div>
+      </dl>
+      <p>Shared run totals, not per-message billing. Main-model token reports only; elapsed includes approval waits. Tool requests may not have completed. No cost estimate.</p>
+    </details>
+  )
+}
+
+type ConfirmationRequest = {
+  title: string
+  description: string
+  confirmLabel: string
+  destructive?: boolean
+  action: () => void | Promise<void>
+  afterConfirm?: () => void
+}
+
+function ConfirmationDialog({ request, onClose, notify }: {
+  request: ConfirmationRequest
+  onClose: (confirmed: boolean, origin: HTMLElement | null) => void
+  notify: (message: string) => void
+}) {
+  const titleId = useId()
+  const descriptionId = useId()
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const priorFocusRef = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current
+    dialog?.showModal()
+    cancelRef.current?.focus()
+    return () => dialog?.close()
+  }, [])
+
+  function close(confirmed = false) {
+    dialogRef.current?.close()
+    onClose(confirmed, priorFocusRef.current)
+  }
+
+  async function submitConfirmation(event: FormEvent) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await request.action()
+      close(true)
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : 'The action failed. Try again.'
+      setError(message)
+      notify(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="confirmation-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      aria-busy={busy}
+      onCancel={(event) => { event.preventDefault(); if (!busy) close() }}
+      onKeyDown={(event) => {
+        event.stopPropagation()
+        trapDialogFocus(event)
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          if (!busy) close()
+        }
+      }}
+      onClick={(event) => {
+        if (busy || event.target !== event.currentTarget) return
+        const bounds = event.currentTarget.getBoundingClientRect()
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close()
+      }}
+    >
+      <form onSubmit={(event) => void submitConfirmation(event)}>
+        <header>
+          <span className="confirmation-symbol" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d={request.destructive ? 'M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6' : 'M5 5h14v14H5V5Zm3 4h8m-8 4h6m-6 3h4'} /></svg>
+          </span>
+          <h2 id={titleId}>{request.title}</h2>
+        </header>
+        <p id={descriptionId}>{request.description}</p>
+        {error && <p className="confirmation-error" role="alert">{error}</p>}
+        <footer>
+          <button ref={cancelRef} className="secondary" type="button" disabled={busy} onClick={() => close()}>Cancel</button>
+          <button className={`primary${request.destructive ? ' destructive' : ''}`} type="submit" disabled={busy}>
+            {busy ? 'Working...' : request.confirmLabel}
+          </button>
+        </footer>
+      </form>
+    </dialog>
+  )
+}
+
 function draftDataBoundary(kind: ProviderKind, endpoint: string): DataBoundary {
   if (kind === 'foundry') return 'external'
   try {
@@ -1162,6 +1296,8 @@ function latestProgressTasks(session: SessionDetail): TaskItem[] | null {
 }
 
 function App() {
+  const [personaId, setPersonaId] = useState<PersonaId>('default')
+  const persona = personas.find((item) => item.id === personaId)
   const [providers, setProviders] = useState<Provider[]>([])
   const [providerManagerOpen, setProviderManagerOpen] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -1176,6 +1312,7 @@ function App() {
     'idle' | 'connecting' | 'reconnecting' | 'ready' | 'running'
   >('idle')
   const [notice, setNotice] = useState('')
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null)
   const [showProviderForm, setShowProviderForm] = useState(false)
   const [showSessionSettings, setShowSessionSettings] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -1207,11 +1344,66 @@ function App() {
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const commandSearchRef = useRef<HTMLInputElement | null>(null)
   const commandTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const confirmationFocusRef = useRef<{ origin: HTMLElement | null; afterConfirm?: () => void } | null>(null)
   const commandPaletteRef = useRef<HTMLElement | null>(null)
   const priorFocusRef = useRef<HTMLElement | null>(null)
   const transcriptRef = useRef<HTMLElement | null>(null)
   const followTranscriptRef = useRef(true)
   const selectedSessionId = selectedSession?.id
+
+  useLayoutEffect(() => {
+    const focus = confirmationFocusRef.current
+    if (confirmation || !focus) return
+    confirmationFocusRef.current = null
+    if (focus.afterConfirm) focus.afterConfirm()
+    else if (focus.origin?.isConnected && !focus.origin.matches(':disabled') && focus.origin.getClientRects().length) focus.origin.focus()
+    else commandTriggerRef.current?.focus()
+  }, [confirmation])
+
+  function closeConfirmation(confirmed: boolean, origin: HTMLElement | null) {
+    confirmationFocusRef.current = { origin, afterConfirm: confirmed ? confirmation?.afterConfirm : undefined }
+    setConfirmation(null)
+  }
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(personaStorageKey)
+      if (saved !== null) {
+        if (!isPersonaId(saved)) throw new Error('The saved persona is not supported. Choose a persona again.')
+        setPersonaId(saved)
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not restore the persona preference.')
+    }
+  }, [])
+
+  function choosePersona(value: PersonaId) {
+    setPersonaId(value)
+    try {
+      localStorage.setItem(personaStorageKey, value)
+    } catch (error) {
+      setNotice(error instanceof Error ? `Persona changed, but could not save the preference: ${error.message}` : 'Persona changed, but could not save the preference.')
+    }
+  }
+
+  function loadPersonaStarter(value: string) {
+    replaceDraft(value, 'Load this persona starting point in place of your current draft? Your unsent draft will be discarded. Nothing will be sent automatically.')
+  }
+
+  function replaceDraft(value: string, description: string) {
+    if (prompt && prompt !== value) {
+      setConfirmation({
+        title: 'Replace draft?',
+        description,
+        confirmLabel: 'Replace draft',
+        action: () => setPrompt(value),
+        afterConfirm: () => promptRef.current?.focus(),
+      })
+    } else {
+      setPrompt(value)
+      promptRef.current?.focus()
+    }
+  }
 
   const refreshProviders = useCallback(async () => {
     const loaded = await api<Provider[]>('/api/providers')
@@ -1423,6 +1615,7 @@ function App() {
       ) ?? [],
     [selectedSession?.events],
   )
+  const telemetry = useMemo(() => messageTelemetry(selectedSession?.events ?? []), [selectedSession?.events])
   const pendingApprovals = approvals.filter((approval) => approval.status === 'pending')
   const hasPendingApproval = pendingApprovals.length > 0
   const canSendPrompt = status === 'ready' && !hasPendingApproval && !contextBusy && !sessionState?.is_running
@@ -1527,18 +1720,22 @@ function App() {
     setShowProviderForm(true)
   }
 
-  async function deleteProvider(providerId = selectedProviderId) {
+  function deleteProvider(providerId = selectedProviderId) {
     const provider = providers.find((item) => item.id === providerId)
-    if (!provider || !window.confirm(`Delete provider "${provider.name}"?`)) return
-    try {
-      await api<void>(`/api/providers/${provider.id}`, { method: 'DELETE' })
-      const remaining = providers.filter((item) => item.id !== provider.id)
-      setProviders(remaining)
-      setSelectedProviderId((current) => current === provider.id ? remaining[0]?.id ?? '' : current)
-      setNotice('Provider profile deleted.')
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not delete the provider.')
-    }
+    if (!provider) return
+    setConfirmation({
+      title: 'Delete provider?',
+      description: `Delete "${provider.name}"? This removes the local profile, not the model or its deployment. Profiles referenced by sessions cannot be deleted.`,
+      confirmLabel: 'Delete provider',
+      destructive: true,
+      action: async () => {
+        await api<void>(`/api/providers/${provider.id}`, { method: 'DELETE' })
+        const remaining = providers.filter((item) => item.id !== provider.id)
+        setProviders(remaining)
+        setSelectedProviderId((current) => current === provider.id ? remaining[0]?.id ?? '' : current)
+        setNotice('Provider profile deleted.')
+      },
+    })
   }
 
   async function exportProviders() {
@@ -1626,6 +1823,7 @@ function App() {
         body: JSON.stringify({
           provider_id: selectedProviderId,
           craft_provider_id: selectedCraftProviderId || null,
+          persona_id: personaId,
           title: 'New session',
         }),
       })
@@ -1690,23 +1888,26 @@ function App() {
     }
   }
 
-  async function deleteSession(session: SessionSummary) {
-    if (!window.confirm(`Delete session "${session.title}"? This cannot be undone.`)) return
-    try {
-      await api<void>(`/api/sessions/${session.id}`, { method: 'DELETE' })
-      const remaining = sessions.filter((item) => item.id !== session.id)
-      setSessions(remaining)
-      if (selectedSession?.id === session.id) {
-        setSelectedSession(null)
-        setShowSessionSettings(false)
-        setLiveResponse('')
-        setWorkspace(null)
-        if (remaining[0]) await openSession(remaining[0].id)
-      }
-      setNotice('Session deleted.')
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not delete the session.')
-    }
+  function deleteSession(session: SessionSummary) {
+    setConfirmation({
+      title: 'Delete session?',
+      description: `Delete "${session.title}" and its recorded conversation? This cannot be undone. Files in a bound workspace will not be deleted.`,
+      confirmLabel: 'Delete session',
+      destructive: true,
+      action: async () => {
+        await api<void>(`/api/sessions/${session.id}`, { method: 'DELETE' })
+        const remaining = sessions.filter((item) => item.id !== session.id)
+        setSessions(remaining)
+        if (selectedSession?.id === session.id) {
+          setSelectedSession(null)
+          setShowSessionSettings(false)
+          setLiveResponse('')
+          setWorkspace(null)
+          if (remaining[0]) await openSession(remaining[0].id)
+        }
+        setNotice('Session deleted.')
+      },
+    })
   }
 
   function submitPrompt(event: FormEvent) {
@@ -1743,10 +1944,8 @@ function App() {
       setNotice('Wait until the session is ready before editing a prompt to rerun.')
       return
     }
-    if (prompt && prompt !== content && !window.confirm('Replace the current draft with this prompt?')) return
-    setPrompt(content)
     setNotice('')
-    promptRef.current?.focus()
+    replaceDraft(content, 'Load this previous prompt in place of your current draft? Your unsent draft will be discarded. Review and send it yourself when ready.')
   }
 
   async function updateMode(mode: SessionState['mode']) {
@@ -2050,10 +2249,9 @@ function App() {
   const sessionCraftProvider = providers.find(
     (provider) => provider.id === selectedSession?.craft_provider_id,
   )
-  const contextPercent = Math.min(
-    100,
-    Math.max(0, latestContextUsage ? (payloadNumber(latestContextUsage, 'context_percent') ?? 0) : 0),
-  )
+  const reportedContextPercent = latestContextUsage ? payloadNumber(latestContextUsage, 'context_percent') : null
+  const contextPercent = reportedContextPercent !== null && Number.isFinite(reportedContextPercent) && reportedContextPercent >= 0
+    ? Math.min(100, reportedContextPercent) : null
   const workspaceCommands: WorkspaceCommand[] = [
     {
       id: 'new-session',
@@ -2123,7 +2321,7 @@ function App() {
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
-      if (providerManagerOpen) return
+      if (providerManagerOpen || confirmation) return
       if (event.altKey && !event.metaKey && !event.shiftKey && !event.getModifierState('AltGraph') && event.key.toLocaleLowerCase() === 'v') {
         event.preventDefault()
         if (event.repeat) return
@@ -2174,12 +2372,10 @@ function App() {
     >
       <aside className="sidebar" id="workspace-sidebar" aria-label="Sessions and providers" hidden={sidebarCollapsed}>
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <img src="/prudence-icon.png" alt="" />
-          </div>
+          <PersonaDial value={personaId} onChange={choosePersona} />
           <div>
             <strong>Prudence</strong>
-            <span>Agent harness</span>
+            <span>{persona?.name ?? 'Agent harness'}</span>
           </div>
         </div>
 
@@ -2226,10 +2422,21 @@ function App() {
                   className={`session-item ${selectedSession?.id === session.id ? 'active' : ''}`}
                   type="button"
                   aria-current={selectedSession?.id === session.id ? 'page' : undefined}
+                  aria-label={`${session.title}, ${sessionPersonaLabel(session)}, ${new Date(session.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`}
                   onClick={() => void openSession(session.id)}
                 >
-                  <span>{session.title}</span>
-                  <time>{new Date(session.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
+                  <span
+                    className="session-persona"
+                    role="img"
+                    aria-label={sessionPersonaLabel(session)}
+                    title={sessionPersonaLabel(session)}
+                  >
+                    <PersonaSymbol id={session.persona_id ?? 'default'} />
+                  </span>
+                  <span className="session-copy">
+                    <span>{session.title}</span>
+                    <time>{new Date(session.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
+                  </span>
                 </button>
                 <button
                   className="session-delete"
@@ -2808,8 +3015,9 @@ function App() {
             >
               {messages.length === 0 && !liveResponse && progressHints.length === 0 ? (
                 <div className="welcome-card">
-                  <div className="welcome-icon" aria-hidden="true">✦</div>
-                  <h2>What should the agent work on?</h2>
+                  <PersonaDial value={personaId} onChange={choosePersona} prominent />
+                  <h2>{persona?.heading ?? 'What should the agent work on?'}</h2>
+                  {persona && <p>{persona.description}</p>}
                   <p>
                     This session uses {sessionProvider ? providerDisplayName(sessionProvider) : 'its configured provider'}
                     {sessionCraftProvider ? ` as Counsel and ${providerDisplayName(sessionCraftProvider)} as Craft` : ''}.
@@ -2827,7 +3035,11 @@ function App() {
                     <article className={`message ${message.type === 'user_message' ? 'user' : 'assistant'}`} key={message.id}>
                       <div className="avatar" aria-hidden="true">{message.type === 'user_message' ? 'S' : 'P'}</div>
                       <div>
-                        <strong>{message.type === 'user_message' ? 'You' : 'Agent'}</strong>
+                        <MessageHeading
+                          author={message.type === 'user_message' ? 'You' : 'Agent'}
+                          timestamp={message.created_at}
+                          partial={message.payload.partial === true}
+                        />
                         {message.type === 'assistant_message' ? (
                           <>
                             <ReactMarkdown>{choicePrompt?.introduction ?? content}</ReactMarkdown>
@@ -2877,6 +3089,7 @@ function App() {
                             </div>
                           </>
                         )}
+                        <MessageRunStats run={telemetry.byMessage.get(message.id)} />
                       </div>
                     </article>
                   )
@@ -2886,7 +3099,7 @@ function App() {
                 <article className="message assistant progress-message" aria-live="polite">
                   <div className="avatar" aria-hidden="true">P</div>
                   <div>
-                    <strong>Working</strong>
+                    <MessageHeading author="Working" timestamp={telemetry.activeRun?.startedAt} runStarted />
                     <ul>
                       {progressHints.map((hint) => <li key={hint}>{hint}</li>)}
                     </ul>
@@ -2897,14 +3110,33 @@ function App() {
                 <article className="message assistant">
                   <div className="avatar" aria-hidden="true">P</div>
                   <div>
-                    <strong>Agent</strong>
+                    <MessageHeading author="Agent" timestamp={telemetry.activeRun?.startedAt} streaming runStarted />
                     <ReactMarkdown>{liveResponse}</ReactMarkdown>
                     <span className="cursor" aria-hidden="true" />
+                    <MessageRunStats run={telemetry.activeRun} />
                   </div>
                 </article>
               )}
             </section>
             <div className="composer-stack">
+              {persona && (
+                <details className="persona-brief" key={persona.id} open>
+                  <summary>{persona.name} <span>{persona.heading}</span></summary>
+                  <p>{persona.description}</p>
+                  <div className="persona-starters" role="group" aria-label={`${persona.name} starting points`}>
+                    {persona.starters.map((starter, index) => (
+                      <button
+                        type="button"
+                        key={starter}
+                        disabled={!canSendPrompt}
+                        onClick={() => loadPersonaStarter(starter)}
+                      >
+                        {persona.actions[index]}
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              )}
               {hasPendingApproval && (
                 <section className="approval-tray" aria-label="Pending approvals" aria-live="polite">
                   <header>
@@ -2987,7 +3219,7 @@ function App() {
                     hasPendingApproval
                       ? 'Resolve the pending approval before continuing...'
                       : status === 'ready'
-                        ? 'Ask Prudence...'
+                        ? persona?.placeholder ?? 'Ask Prudence...'
                         : 'Waiting for the local backend...'
                   }
                   value={prompt}
@@ -3054,9 +3286,9 @@ function App() {
           </>
         ) : (
           <section className="empty-state">
-            <div className="orbit" aria-hidden="true"><span>✦</span></div>
-            <h2>Your local agent workspace</h2>
-            <p>Connect Microsoft Foundry or a local OpenAI-compatible model, then create a durable session.</p>
+            <PersonaDial value={personaId} onChange={choosePersona} prominent />
+            <h2>{persona?.heading ?? 'Your local agent workspace'}</h2>
+            <p>{persona?.description ?? 'Connect Microsoft Foundry or a local OpenAI-compatible model, then create a durable session.'}</p>
             <div className="empty-actions">
               <button className="primary" type="button" onClick={() => setShowProviderForm(true)}>
                 Configure provider
@@ -3111,7 +3343,7 @@ function App() {
               )}
               {latestContextUsage ? (
                 <>
-                  <div
+                  {contextPercent !== null && <div
                     className="usage-meter"
                     role="meter"
                     aria-label="Model context window usage"
@@ -3120,13 +3352,13 @@ function App() {
                     aria-valuenow={contextPercent}
                   >
                     <span style={{ width: `${contextPercent}%` }} />
-                  </div>
+                  </div>}
                   <p>
-                    {payloadNumber(latestContextUsage, 'input_tokens')?.toLocaleString() ?? '0'}
+                    {payloadNumber(latestContextUsage, 'input_tokens')?.toLocaleString() ?? 'Not reported'}
                     {' of '}
                     {payloadNumber(latestContextUsage, 'context_limit')?.toLocaleString() ?? 'unknown'}
                     {' context tokens · '}
-                    {contextPercent.toFixed(1)}%
+                    {contextPercent !== null ? `${contextPercent.toFixed(1)}%` : 'Context usage not reported'}
                   </p>
                 </>
               ) : (
@@ -3361,6 +3593,13 @@ function App() {
           onDelete={(id) => void deleteProvider(id)}
           onImport={() => providerImportRef.current?.click()}
           onExport={() => void exportProviders()}
+          notify={setNotice}
+        />
+      )}
+      {confirmation && (
+        <ConfirmationDialog
+          request={confirmation}
+          onClose={closeConfirmation}
           notify={setNotice}
         />
       )}

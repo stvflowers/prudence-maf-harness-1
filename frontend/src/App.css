@@ -75,12 +75,172 @@
   width: 28px;
   height: 28px;
   object-fit: contain;
-  filter: grayscale(1);
 }
 
-.brand div:last-child {
+.brand > div:last-child {
   display: flex;
   flex-direction: column;
+}
+
+.persona-trigger,
+.persona-dial,
+.persona-brief,
+.session-persona,
+.confirmation-dialog,
+.message-heading,
+.message-run-stats,
+.message-stats-unavailable {
+  --cp-surface: var(--p-surface);
+  --cp-surface-soft: var(--p-surface-soft);
+  --cp-text: var(--p-text);
+  --cp-text-muted: var(--p-muted);
+  --cp-border: var(--p-border);
+  --cp-accent: var(--p-accent-text);
+  --cp-accent-soft: var(--p-accent-soft);
+  --cp-shadow: var(--p-shadow-strong);
+  --cp-danger: var(--p-danger);
+  --cp-danger-soft: var(--p-danger-soft);
+  --cp-accent-fg: var(--p-white);
+}
+
+.persona-trigger {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--cp-accent);
+  background: var(--cp-surface);
+  border: 1px solid var(--cp-border);
+}
+
+.persona-trigger:hover,
+.persona-trigger[aria-expanded="true"] {
+  border-color: var(--cp-accent);
+  background: var(--cp-accent-soft);
+}
+
+.persona-prominent {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+}
+
+.persona-trigger svg,
+.persona-option svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.persona-prominent svg,
+.persona-prominent img {
+  width: 44px;
+  height: 44px;
+}
+
+.persona-dial {
+  position: fixed;
+  z-index: 15;
+  width: 280px;
+  height: 280px;
+  color: var(--cp-text);
+  background: var(--cp-surface);
+  border: 1px solid var(--cp-border);
+  border-radius: 50%;
+  box-sizing: border-box;
+  box-shadow: 0 4px 16px var(--cp-shadow);
+  animation: persona-enter 160ms ease-out;
+}
+
+.persona-option {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  color: var(--cp-text);
+  background: var(--cp-surface-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: 50%;
+}
+
+.persona-option:hover,
+.persona-option[aria-checked="true"] {
+  color: var(--cp-accent);
+  background: var(--cp-accent-soft);
+  border-color: var(--cp-accent);
+}
+
+.persona-default {
+  width: 64px;
+  height: 64px;
+}
+
+.persona-option img {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+}
+
+.persona-brief {
+  margin-bottom: 8px;
+  padding: 12px 16px;
+  color: var(--cp-text);
+  background: var(--cp-surface);
+  border: 1px solid var(--cp-border);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.persona-brief summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.persona-brief summary span {
+  margin-left: 8px;
+  color: var(--cp-text-muted);
+  font-weight: 400;
+}
+
+.persona-brief p {
+  margin: 8px 0;
+  color: var(--cp-text-muted);
+  line-height: 1.5;
+}
+
+.persona-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.persona-starters button {
+  padding: 6px 10px;
+  color: var(--cp-text);
+  background: var(--cp-surface-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: 10px;
+}
+
+.persona-starters button:hover:not(:disabled) {
+  color: var(--cp-accent);
+  border-color: var(--cp-accent);
+}
+
+@keyframes persona-enter {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .persona-dial { animation: none; }
 }
 
 .brand span,
@@ -335,8 +495,8 @@ kbd {
 .session-item {
   display: flex;
   width: 100%;
-  flex-direction: column;
-  gap: 3px;
+  align-items: flex-start;
+  gap: 10px;
   padding: 10px 38px 10px 11px;
   color: var(--p-text);
   text-align: left;
@@ -355,9 +515,128 @@ kbd {
   box-shadow: inset 2px 0 var(--p-accent);
 }
 
-.session-item > span {
+.session-copy > span {
   font-size: 13px;
   font-weight: 600;
+}
+
+.session-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+
+.session-persona {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--cp-text);
+}
+
+.session-persona img,
+.session-persona svg {
+  width: 20px;
+  height: 20px;
+}
+
+.session-persona svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.confirmation-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(460px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 24px;
+  overflow: auto;
+  color: var(--cp-text);
+  background: var(--cp-surface);
+  border: 1px solid var(--cp-border);
+  border-radius: 16px;
+  box-shadow: 0 12px 32px var(--cp-shadow);
+}
+
+.confirmation-dialog::backdrop {
+  --cp-overlay: var(--p-overlay);
+  background: var(--cp-overlay);
+}
+
+.confirmation-dialog header,
+.confirmation-dialog footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.confirmation-dialog h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.confirmation-dialog p {
+  margin: 16px 0;
+  color: var(--cp-text-muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.confirmation-symbol {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  color: var(--cp-accent);
+  background: var(--cp-accent-soft);
+  border-radius: 10px;
+}
+
+.confirmation-symbol svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.confirmation-dialog footer {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 24px;
+}
+
+.confirmation-dialog .destructive {
+  color: var(--cp-accent-fg);
+  background: var(--cp-danger);
+  border-color: var(--cp-danger);
+}
+
+.confirmation-dialog .destructive:hover:not(:disabled) {
+  background: var(--cp-danger);
+  border-color: var(--cp-danger);
+}
+
+.confirmation-dialog .confirmation-error {
+  padding: 12px;
+  color: var(--cp-danger);
+  background: var(--cp-danger-soft);
+  border: 1px solid var(--cp-danger);
+  border-radius: 10px;
 }
 
 .session-delete {
@@ -1239,6 +1518,76 @@ main {
   gap: 13px;
   margin: 0 0 30px;
   color: var(--p-text);
+}
+
+.message > div:last-child {
+  min-width: 0;
+}
+
+.message-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+}
+
+.message-heading time,
+.message-time-unavailable {
+  color: var(--cp-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.message-badge {
+  padding: 2px 6px;
+  color: var(--cp-accent);
+  font-size: 10px;
+  background: var(--cp-accent-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: 4px;
+}
+
+.message-run-stats {
+  margin-top: 10px;
+  color: var(--cp-text-muted);
+  font-size: 11px;
+}
+
+.message-run-stats summary {
+  cursor: pointer;
+  line-height: 1.6;
+}
+
+.message-run-stats summary > span {
+  display: inline-block;
+  margin-left: 12px;
+}
+
+.message-run-stats dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px 16px;
+  max-width: 600px;
+  margin: 12px 0;
+}
+
+.message-run-stats dt {
+  color: var(--cp-text-muted);
+}
+
+.message-run-stats dd {
+  margin: 4px 0 0;
+  color: var(--cp-text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.message .message-run-stats p,
+.message .message-stats-unavailable {
+  margin: 8px 0 0;
+  color: var(--cp-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .message .avatar {
