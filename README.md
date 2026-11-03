@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/prudence-hero-mint.png" alt="Prudence" width="180">
+  <img src="frontend/public/prudence-icon.svg" alt="Prudence layered panes" width="120">
 
   <h1>Prudence</h1>
 
@@ -72,7 +72,50 @@ Prudence uses **Porcelain / Vermilion**: a warm porcelain canvas, light taupe si
 chalk-white surfaces, ink typography, and restrained vermilion selections and actions.
 The light appearance stays consistent even when the operating system prefers dark mode.
 
+- The **Layered panes** mark represents transparency through two separated planes:
+  balanced ink outlines, taupe connectors, and a restrained vermilion front edge.
+  The same SVG is used for the default persona, the dial's reset option, the browser
+  favicon, and this README. The mark stays sharp at small sizes without grayscale filters.
 - Sessions and provider controls stay in the left sidebar.
+- Each session carries the persona selected **when it was created**, shown as a symbol
+  beside its title with an accessible name and hover label. Creation persona metadata
+  persists in SQLite and portable archives; later dial changes never rewrite it.
+  Older sessions and archives without that metadata are explicitly labeled
+  **Creation persona not recorded**, not inferred from titles or current preferences.
+- Session/provider deletion and replacement of an unsent draft use themed in-app
+  confirmations, not browser/Windows popups. Cancel receives initial focus; Escape
+  dismisses without stopping a run. Destructive actions show progress, block duplicate
+  submissions, and retain errors in the dialog for explicit retry.
+- Click the Prudence icon in the sidebar or welcome area to open a symbol-only radial
+  persona dial. Hover for names; arrow keys move between choices, Enter/Space selects,
+  and Escape dismisses. The center icon restores the default experience.
+
+<p align="center">
+  <img src="docs/assets/prudence-persona-dial.png" alt="Symbol-only persona dial with the Layered panes default mark at its center" width="440">
+</p>
+
+- Personas persist as a browser-local UI preference. They tailor welcome copy, composer
+  guidance, and a collapsible task brief with starting points that load a draft, never
+  send automatically. They do not change model selection, session instructions, tools,
+  approval rules, or existing conversation content. Changing personas preserves drafts.
+  New-session creation separately snapshots the current persona as historical metadata.
+  This is the initial task-oriented UI layer, not a set of specialized editors.
+
+| Persona / symbol | Task-oriented experience | Next specialized surface |
+| :--- | :--- | :--- |
+| Software Engineer / code brackets | Expected behavior, constraints, changes, verification | Diffs and test results |
+| Business Intelligence / chart | Business questions, metric definitions, evidence and caveats | Dataset inspection and charts |
+| Blogger / pen | Audience, angle, outline, draft, editorial review | Draft and revision comparison |
+| Social Media / megaphone | Platform, audience, hooks and grounded variants | Channel previews; explicit publishing approval |
+| Presentations / screen | Takeaway, story arc, slide messages and rehearsal | Slide storyboard and speaker notes |
+| Markdown / Markdown mark | Document structure, examples, links and accuracy | Source / rendered preview |
+| Learning Coach / graduation cap | Prior knowledge, learning goal, worked examples and practice | Learning path and understanding checks, not a research-results feed |
+
+**Learning Coach** is the proposed name for the learning-focused Researcher persona.
+Its starting points ask the agent to assess a baseline, teach interactively, and check
+understanding one question at a time. These are explicit editable prompts, not hidden
+model instructions or claims that learning progress has been measured.
+
 - Command-palette actions independently collapse either sidebar: **Alt+V** for the left,
   **Ctrl+Alt+V** for the right. No dedicated header buttons; runs, drafts, and approvals stay intact.
 - Model switching uses a compact in-app picker. **Manage providers** opens a centered
@@ -83,6 +126,16 @@ The light appearance stays consistent even when the operating system prefers dar
   The sidebar shows one identity block, omitting the model subtitle when it duplicates the name.
 - Conversation occupies the center, with **Plan / Execute** in the top bar for single-provider
   sessions. Counsel & Craft retains its existing mode behavior.
+- Every user and agent message shows its recorded date and time, including seconds and the
+  browser's time zone. Streaming responses label the **run start**, then use the recorded
+  message timestamp when saved; interrupted answers are marked **Partial response**.
+- **Run details** expands below a message to show the recorded model, optional Craft model,
+  input/output tokens, elapsed wall-clock time, tool requests, usage reports, and outcome.
+  These are shared run totals, not per-message billing. Approval continuations belong to the
+  same run; elapsed includes approval waits and completion work. Tokens cover reported
+  main-model usage, not Craft/subagent totals. Missing telemetry stays **Not reported** or
+  **Not recorded**, distinct from a genuine zero. No price or inference-speed estimates
+  are fabricated, and historical messages without run events say **Run stats not recorded**.
 - Each user prompt offers **Run again** and **Edit & rerun**. Running again submits the same
   prompt in the current session; editing loads it into the composer and waits for you to send.
   Existing work is not rolled back, and running-state and approval gates still apply.
@@ -116,6 +169,7 @@ white button labels meet the WCAG AA normal-text contrast threshold.
 <details>
   <summary>Approval, settings, and provider screenshots</summary>
 
+  <p><img src="docs/assets/prudence-message-stats.png" alt="Agent message timestamp and expanded recorded run details using synthetic telemetry" width="100%"></p>
   <p><img src="docs/assets/prudence-approval.png" alt="Permission gate showing a synthetic diff and approval controls" width="100%"></p>
   <p><img src="docs/assets/prudence-settings.png" alt="Porcelain / Vermilion session settings with workspace and instruction controls" width="100%"></p>
   <p><img src="docs/assets/prudence-provider-menu.png" alt="Centered provider manager with profile selection, grouped actions, and connectivity history" width="100%"></p>
@@ -128,6 +182,8 @@ white button labels meet the WCAG AA normal-text contrast threshold.
   <p><img src="docs/assets/prudence-provider-picker.png" alt="In-app model provider picker with compact names, distinct Foundry and local symbols, model IDs, boundaries, and a selected checkmark" width="100%"></p>
   <p><img src="docs/assets/prudence-focused-workspace.png" alt="Expanded conversation workspace with both side panels collapsed, restored through commands or pane shortcuts" width="100%"></p>
   <p><img src="docs/assets/prudence-panel-commands.png" alt="Command palette showing independent pane collapse actions with Alt+V and Ctrl+Alt+V shortcuts" width="100%"></p>
+  <p><img src="docs/assets/prudence-delete-confirmation.png" alt="Themed session deletion confirmation with Cancel and Delete session controls" width="460"></p>
+  <p><img src="docs/assets/prudence-session-personas.png" alt="Session list with symbols for the persona selected at creation" width="252"></p>
 </details>
 
 All screenshots above are real browser captures using synthetic fixtures, without real

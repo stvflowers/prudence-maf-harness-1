@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from agent_framework import Content, FunctionInvocationContext, tool
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from maf_harness.api import create_app
 from maf_harness.artifacts import ArtifactStore
@@ -33,6 +34,7 @@ from maf_harness.runner import (
     MafAgentRunner,
     _model_limits_from_metadata,
     _normalize_craft_target_path,
+    _recorded_context_usage,
     _unsupported_code_segments,
 )
 from maf_harness.schemas import (
@@ -50,6 +52,60 @@ from maf_harness.service import HarnessService, classify_run_failure
 from maf_harness.skills import SkillRegistry
 from maf_harness.subagents import InvocationBudget
 from maf_harness.workspace_tools import WorkspaceReadTools
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {"input_token_count": 0, "output_token_count": 0},
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "context_percent": 0.0},
+        ),
+        (
+            {"input_token_count": 120, "output_token_count": 30},
+            {
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "total_tokens": 150,
+                "context_percent": 12.0,
+            },
+        ),
+        (
+            {"output_token_count": 30},
+            {
+                "input_tokens": None,
+                "output_tokens": 30,
+                "total_tokens": None,
+                "context_percent": None,
+            },
+        ),
+        (
+            {"input_token_count": -1, "output_token_count": True, "total_token_count": "20"},
+            {
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "context_percent": None,
+            },
+        ),
+    ],
+)
+def test_recorded_model_usage_preserves_missing_fields_instead_of_inventing_zero(
+    usage: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    assert _recorded_context_usage(usage, 1000) == {**expected, "context_limit": 1000}
+
+
+def test_recorded_model_usage_rejects_fractional_counts_and_unknown_context_limits() -> None:
+    usage = _recorded_context_usage(
+        {"input_token_count": 12.5, "output_token_count": 3.5, "total_token_count": 16.0},
+        1000,
+    )
+    assert usage["input_tokens"] is None
+    assert usage["output_tokens"] is None
+    assert usage["total_tokens"] is None
+    assert usage["context_percent"] is None
+    assert _recorded_context_usage({"input_token_count": 12}, 0)["context_percent"] is None
 
 
 class FakeRunner:
@@ -513,8 +569,7 @@ def test_default_session_title_is_generated_by_active_provider(tmp_path: Path) -
             packets = [websocket.receive_json() for _ in range(9)]
 
         assert any(
-            packet.get("event", {}).get("type") == "session_title_updated"
-            for packet in packets
+            packet.get("event", {}).get("type") == "session_title_updated" for packet in packets
         )
         detail = client.get(f"/api/sessions/{session['id']}").json()
         assert detail["title"] == "Build Deterministic Agent Harness"
@@ -592,9 +647,7 @@ def test_counsel_and_craft_session_pairs_foundry_with_local_provider(
         assert runner.last_craft_profile is not None
         assert runner.last_craft_profile.id == craft["id"]
         detail = client.get(f"/api/sessions/{session['id']}").json()
-        run_started = next(
-            event for event in detail["events"] if event["type"] == "run_started"
-        )
+        run_started = next(event for event in detail["events"] if event["type"] == "run_started")
         assert run_started["payload"] == {
             "provider": "foundry",
             "model": "reasoning-model",
@@ -644,21 +697,28 @@ def test_session_title_can_be_renamed_with_validation(tmp_path: Path) -> None:
         assert client.get(f"/api/sessions/{session['id']}").json()["title"] == (
             "Customer planning workspace"
         )
-        assert client.get("/api/sessions").json()[0]["title"] == (
-            "Customer planning workspace"
+        assert client.get("/api/sessions").json()[0]["title"] == ("Customer planning workspace")
+        assert (
+            client.put(
+                f"/api/sessions/{session['id']}/title",
+                json={"title": "   "},
+            ).status_code
+            == 422
         )
-        assert client.put(
-            f"/api/sessions/{session['id']}/title",
-            json={"title": "   "},
-        ).status_code == 422
-        assert client.put(
-            f"/api/sessions/{session['id']}/title",
-            json={"title": "x" * 121},
-        ).status_code == 422
-        assert client.put(
-            "/api/sessions/missing/title",
-            json={"title": "Missing"},
-        ).status_code == 404
+        assert (
+            client.put(
+                f"/api/sessions/{session['id']}/title",
+                json={"title": "x" * 121},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.put(
+                "/api/sessions/missing/title",
+                json={"title": "Missing"},
+            ).status_code
+            == 404
+        )
 
 
 def test_session_can_be_deleted_with_related_data(tmp_path: Path) -> None:
@@ -678,14 +738,20 @@ def test_session_can_be_deleted_with_related_data(tmp_path: Path) -> None:
         ).json()
         workspace = tmp_path / "delete-workspace"
         workspace.mkdir()
-        assert client.put(
-            f"/api/sessions/{session['id']}/workspace",
-            json={"path": str(workspace)},
-        ).status_code == 200
-        assert client.put(
-            f"/api/sessions/{session['id']}/instructions",
-            json={"content": "Temporary instructions"},
-        ).status_code == 200
+        assert (
+            client.put(
+                f"/api/sessions/{session['id']}/workspace",
+                json={"path": str(workspace)},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                f"/api/sessions/{session['id']}/instructions",
+                json={"content": "Temporary instructions"},
+            ).status_code
+            == 200
+        )
 
         deleted = client.delete(f"/api/sessions/{session['id']}")
         assert deleted.status_code == 204
@@ -745,9 +811,10 @@ def test_session_craft_provider_can_switch_to_another_local_profile(
         )
         assert updated.status_code == 200
         assert updated.json()["craft_provider_id"] == replacement_craft["id"]
-        assert client.get(f"/api/sessions/{session['id']}").json()[
-            "craft_provider_id"
-        ] == replacement_craft["id"]
+        assert (
+            client.get(f"/api/sessions/{session['id']}").json()["craft_provider_id"]
+            == replacement_craft["id"]
+        )
 
 
 @pytest.mark.asyncio
@@ -970,9 +1037,7 @@ async def test_craft_broker_accepts_transport_completed_fenced_code_without_mark
     )
 
     assert result == "FastAPI==0.116.1\nUvicorn==0.35.0"
-    completed = next(
-        payload for event, payload in activities if event == "model_handoff_completed"
-    )
+    completed = next(payload for event, payload in activities if event == "model_handoff_completed")
     assert completed["finish_reason"] == "stop"
 
 
@@ -1126,9 +1191,7 @@ async def test_craft_broker_retries_incomplete_code_once_and_succeeds() -> None:
     assert user_prompts[1] == user_prompts[0]
     assert "partial code" not in user_prompts[1]
     assert sum(event == "model_handoff_retry" for event, _ in activities) == 1
-    completed = next(
-        payload for event, payload in activities if event == "model_handoff_completed"
-    )
+    completed = next(payload for event, payload in activities if event == "model_handoff_completed")
     assert completed["attempts"] == 2
 
 
@@ -1203,9 +1266,7 @@ async def test_missing_marker_retries_even_when_output_is_over_budget() -> None:
     assert sum(event == "model_handoff_retry" for event, _ in activities) == 1
     assert activities[-1][0] == "model_handoff_failed"
     assert activities[-1][1]["reason"] == "incomplete_output"
-    assert not any(
-        payload.get("reason") == "output_over_budget" for _, payload in activities
-    )
+    assert not any(payload.get("reason") == "output_over_budget" for _, payload in activities)
 
 
 @pytest.mark.asyncio
@@ -1297,8 +1358,7 @@ async def test_craft_broker_aborts_requests_queued_behind_provider_failure() -> 
     assert isinstance(results[1], CraftProviderQueueAbortedError)
     assert len(model_calls) == 1
     assert any(
-        event == "model_handoff_failed"
-        and payload["reason"] == "provider_queue_aborted"
+        event == "model_handoff_failed" and payload["reason"] == "provider_queue_aborted"
         for event, payload in activities
     )
 
@@ -1426,9 +1486,7 @@ async def test_raw_craft_code_passes_file_and_fragment_write_boundaries() -> Non
         "fragment": "def existing():\n    return 1",
     }
     assert all("```" not in content for content in persisted.values())
-    assert not any(
-        event == "model_handoff_boundary_blocked" for event, _ in activities
-    )
+    assert not any(event == "model_handoff_boundary_blocked" for event, _ in activities)
 
 
 @pytest.mark.asyncio
@@ -1612,9 +1670,10 @@ def test_local_provider_uses_published_model_limits() -> None:
 
 
 def test_extracts_deployed_local_model_limits() -> None:
-    assert _model_limits_from_metadata(
-        {"maxInputTokens": 16_384, "maxOutputTokens": 4_096}
-    ) == (20_480, 4_096)
+    assert _model_limits_from_metadata({"maxInputTokens": 16_384, "maxOutputTokens": 4_096}) == (
+        20_480,
+        4_096,
+    )
     assert _model_limits_from_metadata(
         {"context_length": 131_072, "max_completion_tokens": 8_192}
     ) == (131_072, 8_192)
@@ -1826,9 +1885,7 @@ def test_binds_workspace_discovers_context_and_loads_instructions(tmp_path: Path
         restored = resumed_client.get(f"/api/sessions/{session['id']}/workspace")
         assert restored.status_code == 200
         assert restored.json()["root_path"] == str(workspace.resolve())
-        restored_instructions = resumed_client.get(
-            f"/api/sessions/{session['id']}/instructions"
-        )
+        restored_instructions = resumed_client.get(f"/api/sessions/{session['id']}/instructions")
         assert restored_instructions.status_code == 200
         assert restored_instructions.json()[-1]["scope"] == "session"
         cleared = resumed_client.delete(f"/api/sessions/{session['id']}/instructions")
@@ -1877,9 +1934,7 @@ def test_discovers_skills_progressively_with_project_precedence(tmp_path: Path) 
     assert len(definitions) == 1
     assert definitions[0].summary.source == "project"
     assert definitions[0].summary.precedence == 20
-    assert definitions[0].summary.relative_path == (
-        ".prudence/skills/account-brief/SKILL.md"
-    )
+    assert definitions[0].summary.relative_path == (".prudence/skills/account-brief/SKILL.md")
     catalog = registry.catalog_instructions(definitions)
     assert catalog is not None
     assert "Create this project's Prudence briefing." in catalog
@@ -2289,10 +2344,7 @@ def test_workspace_read_tools_enforce_bounds_and_inspect_git(tmp_path: Path) -> 
         "git_log",
     ]
     agent_tools = tools.create_agent_tools(write_tools_enabled=True)
-    tool_modes = {
-        agent_tool.name: agent_tool.approval_mode
-        for agent_tool in agent_tools
-    }
+    tool_modes = {agent_tool.name: agent_tool.approval_mode for agent_tool in agent_tools}
     assert tool_modes["search_workspace"] == "never_require"
     assert tool_modes["git_diff"] == "never_require"
     assert tool_modes["create_workspace_file"] == "always_require"
@@ -2304,10 +2356,7 @@ def test_workspace_read_tools_enforce_bounds_and_inspect_git(tmp_path: Path) -> 
         write_tools_enabled=True,
         auto_approve_enabled=True,
     )
-    assert all(
-        agent_tool.approval_mode == "never_require"
-        for agent_tool in auto_approved_tools
-    )
+    assert all(agent_tool.approval_mode == "never_require" for agent_tool in auto_approved_tools)
     assert tools.search("target", "**/*.py") == "app.py:2: Target updated"
     assert "node_modules" not in tools.search("target")
     assert tools.read_file("app.py", 2, 3) == (
@@ -2473,16 +2522,19 @@ def test_workspace_settings_and_memory_are_shared_and_portable(tmp_path: Path) -
             json={"file_name": "second.md", "content": "Second session memory"},
         )
 
-        assert client.put(
-            f"/api/sessions/{first['id']}/workspace",
-            json={"path": str(workspace)},
-        ).status_code == 200
         assert (
-            workspace / ".prudence" / "memory" / "existing.md"
-        ).read_text(encoding="utf-8") == "Migrated content"
-        assert (
-            workspace / ".prudence" / "memory" / "coffee-shop" / "orders.md"
-        ).read_text(encoding="utf-8") == "latte"
+            client.put(
+                f"/api/sessions/{first['id']}/workspace",
+                json={"path": str(workspace)},
+            ).status_code
+            == 200
+        )
+        assert (workspace / ".prudence" / "memory" / "existing.md").read_text(
+            encoding="utf-8"
+        ) == "Migrated content"
+        assert (workspace / ".prudence" / "memory" / "coffee-shop" / "orders.md").read_text(
+            encoding="utf-8"
+        ) == "latte"
         assert (tmp_path / "memory" / first["id"] / "existing.md").is_file()
 
         client.put(
@@ -2508,16 +2560,12 @@ def test_workspace_settings_and_memory_are_shared_and_portable(tmp_path: Path) -
             json={"path": str(workspace)},
         ).json()
         assert second_context["write_tools_enabled"] is True
-        assert second_context["instructions"][-1]["content"] == (
-            "Shared workspace override."
-        )
+        assert second_context["instructions"][-1]["content"] == ("Shared workspace override.")
         client.post(
             f"/api/sessions/{second['id']}/memories",
             json={"file_name": "shared.md", "content": "Visible to both"},
         )
-        first_memories = client.get(
-            f"/api/sessions/{first['id']}/memories"
-        ).json()
+        first_memories = client.get(f"/api/sessions/{first['id']}/memories").json()
         assert {memory["file_name"] for memory in first_memories} == {
             "existing.md",
             "second.md",
@@ -2572,9 +2620,7 @@ def test_workspace_memory_migration_conflicts_do_not_overwrite(tmp_path: Path) -
         )
         assert response.status_code == 422
         assert "migration conflicts" in response.json()["detail"]
-        assert (destination / "context.md").read_text(encoding="utf-8") == (
-            "workspace value"
-        )
+        assert (destination / "context.md").read_text(encoding="utf-8") == ("workspace value")
         assert not (workspace / ".prudence" / "settings.json").exists()
         assert client.get(f"/api/sessions/{session['id']}/workspace").json() is None
 
@@ -2611,17 +2657,13 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
             for _ in range(4):
                 websocket.receive_json()
         approval = client.get(f"/api/sessions/{first['id']}/approvals").json()[0]
-        assert approval["preview"]["affected_paths"] == [
-            ".prudence/notes/test.md"
-        ]
+        assert approval["preview"]["affected_paths"] == [".prudence/notes/test.md"]
         assert ".prudence/notes/test.md" in approval["preview"]["preview_content"]
 
         store = ArtifactStore.for_workspace(workspace)
         tools = WorkspaceReadTools(
             workspace,
-            on_file_mutated=lambda path: store.index_workspace_file(
-                first["id"], path
-            ),
+            on_file_mutated=lambda path: store.index_workspace_file(first["id"], path),
         )
         assert tools.create_file("reports/summary.txt", "Version one") == (
             "Created reports/summary.txt."
@@ -2632,9 +2674,7 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
             tools.create_file("../outside.txt", "outside")
         tools.replace_text("reports/summary.txt", "one", "two")
 
-        listing = client.get(
-            f"/api/sessions/{second['id']}/artifacts"
-        ).json()
+        listing = client.get(f"/api/sessions/{second['id']}/artifacts").json()
         assert len(listing) == 1
         assert len(listing[0]["versions"]) == 1
         assert listing[0]["versions"][0]["version"] == 2
@@ -2642,17 +2682,16 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
         assert listing[0]["versions"][0]["size_bytes"] == len("Version two")
         assert listing[0]["current_version"] == 2
         artifact_id = listing[0]["id"]
-        assert client.get(
-            f"/api/sessions/{second['id']}/artifacts/{artifact_id}",
-            params={"version": 1},
-        ).status_code == 404
-        preview = client.get(
-            f"/api/sessions/{second['id']}/artifacts/{artifact_id}"
-        ).json()
-        assert preview["content"] == "Version two"
-        download = client.get(
-            f"/api/sessions/{second['id']}/artifacts/{artifact_id}/download"
+        assert (
+            client.get(
+                f"/api/sessions/{second['id']}/artifacts/{artifact_id}",
+                params={"version": 1},
+            ).status_code
+            == 404
         )
+        preview = client.get(f"/api/sessions/{second['id']}/artifacts/{artifact_id}").json()
+        assert preview["content"] == "Version two"
+        download = client.get(f"/api/sessions/{second['id']}/artifacts/{artifact_id}/download")
         assert download.text == "Version two"
         assert "summary.txt" in download.headers["content-disposition"]
         assert not list((workspace / ".prudence").rglob("*.txt"))
@@ -2681,9 +2720,11 @@ def test_workspace_mutations_index_real_shared_artifacts(tmp_path: Path) -> None
         note = store.write_business_note(first["id"], "Customer brief", "Updated note")
         assert note.current_version == 2
         assert [version.version for version in note.versions] == [2]
-        assert client.get(
-            f"/api/sessions/{second['id']}/artifacts/{note.id}"
-        ).json()["content"].endswith("Updated note")
+        assert (
+            client.get(f"/api/sessions/{second['id']}/artifacts/{note.id}")
+            .json()["content"]
+            .endswith("Updated note")
+        )
 
 
 def test_workspace_artifact_store_migrates_legacy_business_notes(
@@ -2720,6 +2761,96 @@ def test_workspace_artifact_store_migrates_legacy_business_notes(
     assert migrated_store.preview(session_id, note.id).content.endswith("Preserve me")
 
 
+@pytest.mark.parametrize(
+    "persona_id",
+    [
+        "default",
+        "engineer",
+        "intelligence",
+        "blogger",
+        "social",
+        "presentations",
+        "markdown",
+        "learning",
+    ],
+)
+def test_session_creation_persona_is_persisted_and_not_changed_by_title_updates(
+    tmp_path: Path, persona_id: str
+) -> None:
+    with make_client(tmp_path) as client:
+        provider = client.post(
+            "/api/providers",
+            json={
+                "name": "Persona test",
+                "kind": "local",
+                "endpoint": "http://127.0.0.1:11434/v1",
+                "model": "test-model",
+            },
+        ).json()
+        response = client.post(
+            "/api/sessions",
+            json={
+                "provider_id": provider["id"],
+                "title": "Persona session",
+                "persona_id": persona_id,
+            },
+        )
+        assert response.status_code == 201
+        session = response.json()
+        assert session["persona_id"] == persona_id
+        assert client.get("/api/sessions").json()[0]["persona_id"] == persona_id
+        assert client.get(f"/api/sessions/{session['id']}").json()["persona_id"] == persona_id
+        renamed = client.put(
+            f"/api/sessions/{session['id']}/title",
+            json={"title": "Renamed", "persona_id": "social"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["persona_id"] == persona_id
+        default = client.post("/api/sessions", json={"provider_id": provider["id"]})
+        assert default.json()["persona_id"] == "default"
+        rejected = client.post(
+            "/api/sessions", json={"provider_id": provider["id"], "persona_id": "unsupported"}
+        )
+        assert rejected.status_code == 422
+    with make_client(tmp_path) as client:
+        assert client.get(f"/api/sessions/{session['id']}").json()["persona_id"] == persona_id
+
+
+def test_persona_database_migration_preserves_unknown_legacy_creation_personas(
+    tmp_path: Path,
+) -> None:
+    url = f"sqlite:///{tmp_path / 'legacy.db'}"
+    database = Database(url)
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE sessions (id VARCHAR(36) PRIMARY KEY, provider_id VARCHAR(36), "
+                "title VARCHAR(120), maf_state JSON, created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sessions (id, provider_id, title, created_at, updated_at) "
+                "VALUES ('legacy', 'legacy-provider', 'Legacy session', "
+                "'2026-11-02 14:00:00', '2026-11-02 14:00:00')"
+            )
+        )
+    database.initialize()
+    database.initialize()
+    repository = Repository(database)
+    legacy = repository.get_session("legacy")
+    assert legacy is not None
+    assert legacy.title == "Legacy session"
+    assert legacy.persona_id is None
+    assert legacy.craft_provider_id is None
+    assert repository.list_sessions()[0].persona_id is None
+    database.engine.dispose()
+    reopened = Database(url)
+    reopened.initialize()
+    assert Repository(reopened).list_sessions()[0].persona_id is None
+    reopened.engine.dispose()
+
+
 def test_portable_session_archive_round_trip_excludes_runtime_state(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         provider = client.post(
@@ -2734,7 +2865,11 @@ def test_portable_session_archive_round_trip_excludes_runtime_state(tmp_path: Pa
         ).json()
         session = client.post(
             "/api/sessions",
-            json={"provider_id": provider["id"], "title": "Portable session"},
+            json={
+                "provider_id": provider["id"],
+                "title": "Portable session",
+                "persona_id": "learning",
+            },
         ).json()
         with client.websocket_connect(f"/api/sessions/{session['id']}/stream") as websocket:
             websocket.send_json({"type": "prompt", "content": "Archive this conversation"})
@@ -2760,6 +2895,7 @@ def test_portable_session_archive_round_trip_excludes_runtime_state(tmp_path: Pa
         assert exported.status_code == 200
         archive = exported.json()
         assert archive["schema_version"] == 1
+        assert archive["persona_id"] == "learning"
         assert archive["source_provider"]["api_key_env"] == "LOCAL_MODEL_API_KEY"
         assert "id" not in archive["source_provider"]
         assert "maf_state" not in archive
@@ -2779,22 +2915,37 @@ def test_portable_session_archive_round_trip_excludes_runtime_state(tmp_path: Pa
         imported_session = imported.json()
         assert imported_session["id"] != session["id"]
         assert imported_session["title"] == "Portable session (imported)"
+        assert imported_session["persona_id"] == "learning"
 
         detail = client.get(f"/api/sessions/{imported_session['id']}").json()
+        assert detail["persona_id"] == "learning"
         assert detail["events"][-1]["type"] == "session_imported"
         assert detail["events"][-1]["payload"]["continuation_state_restored"] is False
-        assert client.get(
-            f"/api/sessions/{imported_session['id']}/memories"
-        ).json()[0]["content"] == "Remember this."
-        assert client.get(
-            f"/api/sessions/{imported_session['id']}/artifacts"
-        ).json()[0]["current_version"] == 2
-        instructions = client.get(
-            f"/api/sessions/{imported_session['id']}/instructions"
-        ).json()
+        assert (
+            client.get(f"/api/sessions/{imported_session['id']}/memories").json()[0]["content"]
+            == "Remember this."
+        )
+        assert (
+            client.get(f"/api/sessions/{imported_session['id']}/artifacts").json()[0][
+                "current_version"
+            ]
+            == 2
+        )
+        instructions = client.get(f"/api/sessions/{imported_session['id']}/instructions").json()
         assert instructions[-1]["content"] == "Use the imported session guidance."
         assert client.get(f"/api/sessions/{imported_session['id']}/workspace").json() is None
         assert client.get(f"/api/sessions/{imported_session['id']}/approvals").json() == []
+        archive.pop("persona_id")
+        legacy_import = client.post(
+            "/api/sessions/import", json={"provider_id": provider["id"], "archive": archive}
+        )
+        assert legacy_import.status_code == 201
+        assert legacy_import.json()["persona_id"] is None
+        archive["persona_id"] = "unsupported"
+        rejected = client.post(
+            "/api/sessions/import", json={"provider_id": provider["id"], "archive": archive}
+        )
+        assert rejected.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -2863,8 +3014,7 @@ def test_approval_continuation_and_duplicate_rejection(
             messages = [websocket.receive_json() for _ in range(4)]
 
         assert any(
-            message.get("event", {}).get("type") == "approval_requested"
-            for message in messages
+            message.get("event", {}).get("type") == "approval_requested" for message in messages
         )
         approval = client.get(f"/api/sessions/{session['id']}/approvals").json()[0]
         assert approval["status"] == "pending"
@@ -2875,8 +3025,7 @@ def test_approval_continuation_and_duplicate_rejection(
             "affected_paths": [],
             "preview_kind": "summary",
             "preview_content": (
-                "Review the typed operation, affected paths, and exact arguments "
-                "before approval."
+                "Review the typed operation, affected paths, and exact arguments before approval."
             ),
             "preview_truncated": False,
         }
@@ -2885,9 +3034,7 @@ def test_approval_continuation_and_duplicate_rejection(
             blocked = websocket.receive_json()
         assert blocked == {
             "type": "error",
-            "payload": {
-                "message": "Resolve the pending approval before sending another message."
-            },
+            "payload": {"message": "Resolve the pending approval before sending another message."},
         }
         detail = client.get(f"/api/sessions/{session['id']}").json()
         assert sum(event["type"] == "user_message" for event in detail["events"]) == 1
@@ -2949,9 +3096,7 @@ def test_file_approval_preview_persists_across_restart(tmp_path: Path) -> None:
         approval_id = approval["id"]
 
     with make_client(tmp_path) as resumed_client:
-        restored = resumed_client.get(
-            f"/api/sessions/{session['id']}/approvals"
-        ).json()[0]
+        restored = resumed_client.get(f"/api/sessions/{session['id']}/approvals").json()[0]
         assert restored["id"] == approval_id
         assert restored["preview"] == approval["preview"]
 
@@ -3031,11 +3176,7 @@ async def test_cancels_active_run_and_persists_event(tmp_path: Path) -> None:
     detail = repository.get_session(session.id)
     assert detail is not None
     assert detail.events[-1].type == "run_cancelled"
-    assert any(
-        message.get("event", {}).get("type") == "run_cancelled"
-        for message in reconnected
-    )
+    assert any(message.get("event", {}).get("type") == "run_cancelled" for message in reconnected)
     assert not any(
-        message.get("event", {}).get("type") == "run_cancelled"
-        for message in first_connection
+        message.get("event", {}).get("type") == "run_cancelled" for message in first_connection
     )

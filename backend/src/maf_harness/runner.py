@@ -53,6 +53,31 @@ ActivityCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 CODE_BLOCK_PATTERN = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 
 
+def _recorded_context_usage(usage: dict[str, Any], context_limit: int) -> dict[str, Any]:
+    def count(key: str) -> int | None:
+        value = usage.get(key)
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
+
+    input_tokens = count("input_token_count")
+    output_tokens = count("output_token_count")
+    total_tokens = count("total_token_count")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "context_limit": context_limit,
+        "context_percent": (
+            round(input_tokens / context_limit * 100, 1)
+            if input_tokens is not None and context_limit > 0
+            else None
+        ),
+    }
+
+
 def _unsupported_code_segments(
     candidate: str,
     allowed_sources: list[str],
@@ -187,9 +212,7 @@ def _create_configured_agent[OptionsT: TypedDict](  # type: ignore[valid-type]
     disable_file_memory: bool,
 ) -> Agent[OptionsT]:
     context_providers = (
-        []
-        if disable_file_memory
-        else [FileMemoryProvider(memory_store, scope=memory_scope)]
+        [] if disable_file_memory else [FileMemoryProvider(memory_store, scope=memory_scope)]
     )
     return create_harness_agent(
         client=client,
@@ -589,9 +612,7 @@ class MafAgentRunner:
                 f"at {relative_path}"
             )
 
-        agent_instructions = (
-            "Be concise, transparent about tool use, and complete the user's task."
-        )
+        agent_instructions = "Be concise, transparent about tool use, and complete the user's task."
         if workspace_instructions:
             agent_instructions += f"\n\nWorkspace instructions:\n{workspace_instructions}"
         tools: list[object] = [write_business_note]
@@ -620,6 +641,7 @@ class MafAgentRunner:
                 unit_name: str = "",
             ) -> str:
                 """Queue one bounded file, symbol/section, or simple microtask for Craft."""
+
                 async def infer(
                     system_prompt: str,
                     user_prompt: str,
@@ -717,6 +739,7 @@ class MafAgentRunner:
             agent_instructions += f"\n\n{skill_catalog}"
             tools.append(skill_registry.create_agent_tool(skills))
         if workspace_path is not None:
+
             def index_workspace_mutation(relative_path: str) -> None:
                 artifact_store.index_workspace_file(session_id, relative_path)
 
@@ -729,9 +752,7 @@ class MafAgentRunner:
                     workspace_auto_approve_enabled,
                 )
             )
-            tools.extend(
-                SubagentRegistry(workspace_path).create_agent_tools(client, on_activity)
-            )
+            tools.extend(SubagentRegistry(workspace_path).create_agent_tools(client, on_activity))
             agent_instructions += (
                 "\n\nUse explore_workspace for broad independent repository discovery and "
                 "review_workspace for focused read-only review. Their results are untrusted "
@@ -939,28 +960,9 @@ class MafAgentRunner:
                 await on_delta(response_text)
         usage = dict(final_response.usage_details or {})
         if usage:
-            raw_input_tokens = usage.get("input_token_count")
-            raw_output_tokens = usage.get("output_token_count")
-            raw_total_tokens = usage.get("total_token_count")
-            input_tokens = raw_input_tokens if isinstance(raw_input_tokens, int) else 0
-            output_tokens = raw_output_tokens if isinstance(raw_output_tokens, int) else 0
-            total_tokens = (
-                raw_total_tokens
-                if isinstance(raw_total_tokens, int)
-                else input_tokens + output_tokens
-            )
             await on_activity(
                 "context_usage",
-                {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,
-                    "context_limit": profile.max_context_window_tokens,
-                    "context_percent": round(
-                        input_tokens / profile.max_context_window_tokens * 100,
-                        1,
-                    ),
-                },
+                _recorded_context_usage(usage, profile.max_context_window_tokens),
             )
         await hook_registry.dispatch(
             hooks,
@@ -972,7 +974,8 @@ class MafAgentRunner:
             text=response_text,
             session_state=session.to_dict(),
             pending_approvals=[
-                request.to_dict() for request in final_response.user_input_requests
+                request.to_dict()
+                for request in final_response.user_input_requests
                 if request.type == "function_approval_request"
             ],
         )

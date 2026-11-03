@@ -231,9 +231,7 @@ class HarnessService:
         self,
         profiles: list[ProviderProfileCreate],
     ) -> list[ProviderProfile]:
-        initialized = [
-            await self._initialize_provider_limits(profile) for profile in profiles
-        ]
+        initialized = [await self._initialize_provider_limits(profile) for profile in profiles]
         return self.repository.import_providers(initialized)
 
     async def _initialize_provider_limits(
@@ -301,9 +299,7 @@ class HarnessService:
                 else None
             )
             if session.craft_provider_id and craft_profile is None:
-                raise LookupError(
-                    f"Craft provider {session.craft_provider_id} was not found"
-                )
+                raise LookupError(f"Craft provider {session.craft_provider_id} was not found")
 
             await self._record_and_emit(session_id, "user_message", {"content": content})
             await self._record_and_emit(
@@ -445,9 +441,7 @@ class HarnessService:
                 else None
             )
             if session.craft_provider_id and craft_profile is None:
-                raise LookupError(
-                    f"Craft provider {session.craft_provider_id} was not found"
-                )
+                raise LookupError(f"Craft provider {session.craft_provider_id} was not found")
             session_state = self.repository.get_session_state(approval.session_id)
             if session_state is None:
                 raise ValueError("Session has no framework state to resume")
@@ -576,9 +570,7 @@ class HarnessService:
     ) -> ArtifactPreview:
         if self.repository.get_session(session_id) is None:
             raise LookupError(f"Session {session_id} was not found")
-        return self._artifact_store_for(session_id).preview(
-            session_id, artifact_id, version
-        )
+        return self._artifact_store_for(session_id).preview(session_id, artifact_id, version)
 
     def artifact_download(
         self,
@@ -672,27 +664,19 @@ class HarnessService:
                     if previous_root == str(root)
                     else False
                 ),
-                session_instructions=self.repository.get_session_instructions(
-                    session_id
-                ),
+                session_instructions=self.repository.get_session_instructions(session_id),
             )
             settings_need_save = True
         self._migrate_session_memory(session_id, root)
         if settings_need_save:
             settings_store.save(settings)
         self.repository.set_workspace(session_id, str(root))
-        self.repository.set_workspace_write_tools(
-            session_id, settings.write_tools_enabled
-        )
-        self.repository.set_workspace_auto_approve(
-            session_id, settings.auto_approve_enabled
-        )
+        self.repository.set_workspace_write_tools(session_id, settings.write_tools_enabled)
+        self.repository.set_workspace_auto_approve(session_id, settings.auto_approve_enabled)
         if settings.session_instructions is None:
             self.repository.clear_session_instructions(session_id)
         else:
-            self.repository.set_session_instructions(
-                session_id, settings.session_instructions
-            )
+            self.repository.set_session_instructions(session_id, settings.session_instructions)
         return self.get_workspace_context(session_id)
 
     def get_workspace_context(self, session_id: str) -> WorkspaceContext:
@@ -716,9 +700,7 @@ class HarnessService:
         discovery_truncated = False
         for _, directory_names, file_names in os.walk(root, followlinks=False):
             directory_names[:] = [
-                name
-                for name in directory_names
-                if name not in IGNORED_WORKSPACE_DIRECTORIES
+                name for name in directory_names if name not in IGNORED_WORKSPACE_DIRECTORIES
             ]
             discovered_file_count += len(file_names)
             if discovered_file_count >= MAX_DISCOVERED_FILES:
@@ -755,8 +737,7 @@ class HarnessService:
         ]
         return (
             "Apply these instructions in ascending precedence order; later sources "
-            "override earlier sources when they conflict.\n\n"
-            + "\n\n---\n\n".join(sections)
+            "override earlier sources when they conflict.\n\n" + "\n\n---\n\n".join(sections)
         )
 
     def list_instruction_sources(
@@ -817,9 +798,7 @@ class HarnessService:
                         else "Session override"
                     ),
                     relative_path=(
-                        ".prudence/settings.json"
-                        if workspace_root is not None
-                        else "session"
+                        ".prudence/settings.json" if workspace_root is not None else "session"
                     ),
                     precedence=60,
                     content=session_content,
@@ -863,11 +842,7 @@ class HarnessService:
         workspace_path = self.repository.get_workspace(session_id)
         if workspace_path is not None:
             store = WorkspaceSettingsStore(Path(workspace_path))
-            store.save(
-                store.load().model_copy(
-                    update={"session_instructions": update.content}
-                )
-            )
+            store.save(store.load().model_copy(update={"session_instructions": update.content}))
         self.repository.set_session_instructions(session_id, update.content)
         await self._record_and_emit(
             session_id,
@@ -950,9 +925,7 @@ class HarnessService:
         session = AgentSession.from_dict(state)
         todo_state = session.state.get("todo")
         todo_mapping: Mapping[object, object] = (
-            cast(Mapping[object, object], todo_state)
-            if isinstance(todo_state, Mapping)
-            else {}
+            cast(Mapping[object, object], todo_state) if isinstance(todo_state, Mapping) else {}
         )
         raw_items = todo_mapping.get("items")
         tasks = TASK_LIST_ADAPTER.validate_python(raw_items) if isinstance(raw_items, list) else []
@@ -999,9 +972,7 @@ class HarnessService:
             self.repository.workspace_write_tools_enabled(session_id)
             != settings.write_tools_enabled
         ):
-            self.repository.set_workspace_write_tools(
-                session_id, settings.write_tools_enabled
-            )
+            self.repository.set_workspace_write_tools(session_id, settings.write_tools_enabled)
         return settings.write_tools_enabled
 
     def _workspace_auto_approve_enabled(self, session_id: str) -> bool:
@@ -1013,9 +984,7 @@ class HarnessService:
             self.repository.workspace_auto_approve_enabled(session_id)
             != settings.auto_approve_enabled
         ):
-            self.repository.set_workspace_auto_approve(
-                session_id, settings.auto_approve_enabled
-            )
+            self.repository.set_workspace_auto_approve(session_id, settings.auto_approve_enabled)
         return settings.auto_approve_enabled
 
     def _session_instruction_content(self, session_id: str) -> str | None:
@@ -1079,9 +1048,7 @@ class HarnessService:
             copies.append((source, destination))
         if conflicts:
             joined = ", ".join(conflicts)
-            raise ValueError(
-                f"Workspace memory migration conflicts with existing files: {joined}"
-            )
+            raise ValueError(f"Workspace memory migration conflicts with existing files: {joined}")
 
         for source, destination in copies:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1130,8 +1097,7 @@ class HarnessService:
                     file_name=path.name,
                     description=(
                         description_path.read_text(encoding="utf-8")
-                        if description_path.is_file()
-                        and not description_path.is_symlink()
+                        if description_path.is_file() and not description_path.is_symlink()
                         else None
                     ),
                     content=path.read_text(encoding="utf-8"),
@@ -1173,14 +1139,11 @@ class HarnessService:
             description_path = path.with_name(f"{path.stem}_description.md")
             description = (
                 description_path.read_text(encoding="utf-8").strip()
-                if description_path.is_file()
-                and not description_path.is_symlink()
+                if description_path.is_file() and not description_path.is_symlink()
                 else ""
             )
             entries.append(
-                f"- **{path.name}**: {description}"
-                if description
-                else f"- **{path.name}**"
+                f"- **{path.name}**: {description}" if description else f"- **{path.name}**"
             )
             if len(entries) >= 50:
                 break
@@ -1246,6 +1209,7 @@ class HarnessService:
             )
         return SessionArchive(
             title=session.title,
+            persona_id=session.persona_id,
             source_provider=ProviderProfileCreate.model_validate(
                 provider,
                 from_attributes=True,
@@ -1269,6 +1233,7 @@ class HarnessService:
             request.provider_id,
             archive.title,
             archive.events,
+            archive.persona_id,
         )
         for memory in archive.memories:
             self.create_memory(
@@ -1394,9 +1359,7 @@ class HarnessService:
                     preview_content="The session has no bound workspace.",
                 )
             try:
-                diff, truncated = WorkspaceReadTools(
-                    Path(workspace_root)
-                ).preview_replace_text(
+                diff, truncated = WorkspaceReadTools(Path(workspace_root)).preview_replace_text(
                     relative_path,
                     old_text,
                     new_text,

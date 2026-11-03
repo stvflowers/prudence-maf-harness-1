@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Prudence layered panes</title>
+  <style>
+    :root {
+      --cp-surface: #fffdfa;
+      --cp-text: #252320;
+      --cp-border-strong: #a69b8d;
+      --cp-accent: #e34b36;
+    }
+    .pane { stroke: var(--cp-text); }
+    .connector { stroke: var(--cp-border-strong); }
+    .upper { fill: var(--cp-surface); }
+    .accent { stroke: var(--cp-accent); }
+  </style>
+  <g fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <path class="connector" d="M3 12v5M21 12v5" />
+    <path class="pane" d="m3 17 5-2.5m8 0 5 2.5" />
+    <path class="pane" d="m3 17 9 4.5 9-4.5" />
+    <path class="pane upper" d="m12 3.5 9 5-9 5-9-5 9-5Z" />
+    <path class="accent" d="m8 19.5 4 2 4-2" />
+  </g>
+</svg>

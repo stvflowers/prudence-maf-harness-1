@@ -34,6 +34,7 @@ from maf_harness.schemas import (
     ApprovalRecord,
     ApprovalStatus,
     EventRecord,
+    PersonaId,
     ProviderProbeRecord,
     ProviderProfile,
     ProviderProfileCreate,
@@ -87,6 +88,7 @@ class HarnessSessionRow(Base):
         nullable=True,
     )
     title: Mapped[str] = mapped_column(String(120))
+    persona_id: Mapped[PersonaId | None] = mapped_column(String(20), nullable=True)
     maf_state: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -171,9 +173,11 @@ class Database:
                 connection.execute(
                     text("ALTER TABLE sessions ADD COLUMN craft_provider_id VARCHAR(36)")
                 )
+        if "persona_id" not in session_columns:
+            with self.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE sessions ADD COLUMN persona_id VARCHAR(20)"))
         workspace_capability_columns = {
-            column["name"]
-            for column in inspect(self.engine).get_columns("workspace_capabilities")
+            column["name"] for column in inspect(self.engine).get_columns("workspace_capabilities")
         }
         if "auto_approve_enabled" not in workspace_capability_columns:
             with self.engine.begin() as connection:
@@ -189,6 +193,7 @@ class Database:
                 .where(ProviderProbeRow.ok.is_(True))
                 .values(message="Connected successfully.")
             )
+
 
 class Repository:
     def __init__(self, database: Database) -> None:
@@ -247,14 +252,8 @@ class Repository:
                 )
             )
             if session_count:
-                raise ValueError(
-                    "Provider cannot be deleted while sessions still reference it"
-                )
-            db.execute(
-                delete(ProviderProbeRow).where(
-                    ProviderProbeRow.provider_id == provider_id
-                )
-            )
+                raise ValueError("Provider cannot be deleted while sessions still reference it")
+            db.execute(delete(ProviderProbeRow).where(ProviderProbeRow.provider_id == provider_id))
             db.delete(row)
             db.commit()
 
@@ -323,6 +322,7 @@ class Repository:
             id=new_id(),
             provider_id=session.provider_id,
             craft_provider_id=session.craft_provider_id,
+            persona_id=session.persona_id,
             title=session.title,
             maf_state=None,
             created_at=now,
@@ -338,12 +338,14 @@ class Repository:
         provider_id: str,
         title: str,
         events: list[SessionArchiveEvent],
+        persona_id: PersonaId | None = None,
     ) -> SessionSummary:
         now = utc_now()
         row = HarnessSessionRow(
             id=new_id(),
             provider_id=provider_id,
             craft_provider_id=None,
+            persona_id=persona_id,
             title=f"{title[:109]} (imported)",
             maf_state=None,
             created_at=now,
@@ -392,13 +394,9 @@ class Repository:
             row = db.get(HarnessSessionRow, session_id)
             if row is None:
                 raise LookupError(f"Session {session_id} was not found")
-            approval_ids = select(ApprovalRow.id).where(
-                ApprovalRow.session_id == session_id
-            )
+            approval_ids = select(ApprovalRow.id).where(ApprovalRow.session_id == session_id)
             db.execute(
-                delete(ApprovalPreviewRow).where(
-                    ApprovalPreviewRow.approval_id.in_(approval_ids)
-                )
+                delete(ApprovalPreviewRow).where(ApprovalPreviewRow.approval_id.in_(approval_ids))
             )
             db.execute(delete(ApprovalRow).where(ApprovalRow.session_id == session_id))
             db.execute(
@@ -407,14 +405,10 @@ class Repository:
                 )
             )
             db.execute(
-                delete(WorkspaceBindingRow).where(
-                    WorkspaceBindingRow.session_id == session_id
-                )
+                delete(WorkspaceBindingRow).where(WorkspaceBindingRow.session_id == session_id)
             )
             db.execute(
-                delete(SessionInstructionRow).where(
-                    SessionInstructionRow.session_id == session_id
-                )
+                delete(SessionInstructionRow).where(SessionInstructionRow.session_id == session_id)
             )
             db.execute(delete(EventRow).where(EventRow.session_id == session_id))
             db.delete(row)
@@ -440,6 +434,7 @@ class Repository:
                 id=row.id,
                 provider_id=row.provider_id,
                 craft_provider_id=row.craft_provider_id,
+                persona_id=row.persona_id,
                 title=row.title,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -667,10 +662,7 @@ class Repository:
                     )
                 ).all()
             }
-            return [
-                self._approval_record(row, previews.get(row.id))
-                for row in rows
-            ]
+            return [self._approval_record(row, previews.get(row.id)) for row in rows]
 
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         with self._database.session_factory() as db:
